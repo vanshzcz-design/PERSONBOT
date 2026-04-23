@@ -4,7 +4,7 @@ from .user_withdraw_gift import withdraw_handler, gift_handler
 from .user_tasks import tasks_handler
 from .admin_main import (
     admin_cmd, admin_dashboard, admin_all_users, admin_withdrawals, admin_settings,
-    admin_broadcast, admin_gift_manager, admin_redeem_manager
+    admin_broadcast, admin_gift_manager, admin_redeem_manager, admin_channel_panel, admin_wd_control
 )
 from .admin_management import admin_manager
 from .admin_task_manager import admin_task_manager
@@ -88,6 +88,12 @@ def universal_handler(message):
             return
         if text == "⚙️ Settings" and is_admin(user_id):
             admin_settings(message)
+            return
+        if text == "📣 Channel Panel" and is_admin(user_id):
+            admin_channel_panel(message)
+            return
+        if text == "🏧 WD Control" and is_admin(user_id):
+            admin_wd_control(message)
             return
         if text == "📢 Broadcast" and is_admin(user_id):
             admin_broadcast(message)
@@ -868,6 +874,131 @@ def universal_handler(message):
             safe_send(message.chat.id, f"{pe('check')} Message sent to <code>{tid}</code>!")
         except Exception as e:
             safe_send(message.chat.id, f"{pe('cross')} Failed: {e}")
+        return
+
+    if state == "admin_set_daily_withdraw_limit":
+        try:
+            val = int(float(text))
+        except Exception:
+            safe_send(message.chat.id, f"{pe('cross')} Enter a valid whole number!")
+            return
+        clear_state(user_id)
+        saved = withdraw_limit.set_daily_limit(val)
+        safe_send(message.chat.id, f"{pe('check')} Daily withdrawal count limit = {saved}")
+        return
+
+    if state == "admin_set_max_single_withdraw":
+        try:
+            val = float(text)
+        except Exception:
+            safe_send(message.chat.id, f"{pe('cross')} Enter valid number!")
+            return
+        clear_state(user_id)
+        set_setting("max_single_withdraw_amount", val)
+        safe_send(message.chat.id, f"{pe('check')} Single withdrawal cap = ₹{val}")
+        return
+
+    if state == "admin_set_join_request_url":
+        clear_state(user_id)
+        set_setting("join_request_url", text.strip())
+        log_admin_action(user_id, "set_join_request_url", text.strip())
+        safe_send(message.chat.id, f"{pe('check')} Main request URL updated!")
+        return
+
+    if state == "admin_set_join_image":
+        clear_state(user_id)
+        set_setting("join_image", text.strip())
+        log_admin_action(user_id, "set_join_image", text.strip())
+        safe_send(message.chat.id, f"{pe('check')} Join image updated!")
+        return
+
+    if state == "admin_add_join_channel":
+        parts = [x.strip() for x in text.split('|')]
+        if len(parts) < 5:
+            safe_send(message.chat.id, f"{pe('cross')} Format: <code>Label | URL | CHAT_ID | force/open | on/off</code>")
+            return
+        try:
+            chat_id = int(parts[2]) if parts[2] else 0
+        except Exception:
+            safe_send(message.chat.id, f"{pe('cross')} CHAT_ID must be a number. Use 0 if not needed.")
+            return
+        mode = parts[3].lower()
+        enabled = parts[4].lower() in {"on", "yes", "1", "true", "active"}
+        row = {"label": parts[0], "url": parts[1], "chat_id": chat_id, "force_join": mode == "force", "active": enabled}
+        channels = get_join_channels()
+        channels.append(row)
+        save_join_channels(channels)
+        clear_state(user_id)
+        log_admin_action(user_id, "add_join_channel", f"Added join channel {parts[0]}")
+        safe_send(message.chat.id, f"{pe('check')} Join channel added successfully!")
+        return
+
+    if state == "admin_edit_join_channel":
+        data = get_state_data(user_id)
+        parts = [x.strip() for x in text.split('|')]
+        if len(parts) < 5:
+            safe_send(message.chat.id, f"{pe('cross')} Format: <code>Label | URL | CHAT_ID | force/open | on/off</code>")
+            return
+        try:
+            idx = int(data.get("index", -1))
+            chat_id = int(parts[2]) if parts[2] else 0
+        except Exception:
+            safe_send(message.chat.id, f"{pe('cross')} Invalid index or CHAT_ID!")
+            return
+        channels = get_join_channels()
+        if idx < 0 or idx >= len(channels):
+            clear_state(user_id)
+            safe_send(message.chat.id, f"{pe('cross')} Channel not found!")
+            return
+        channels[idx] = {"label": parts[0], "url": parts[1], "chat_id": chat_id, "force_join": parts[3].lower() == "force", "active": parts[4].lower() in {"on", "yes", "1", "true", "active"}}
+        save_join_channels(channels)
+        clear_state(user_id)
+        log_admin_action(user_id, "edit_join_channel", f"Edited join channel #{idx+1}")
+        safe_send(message.chat.id, f"{pe('check')} Join channel updated!")
+        return
+
+    if state == "admin_add_extra_button":
+        parts = [x.strip() for x in text.split('|')]
+        if len(parts) < 4:
+            safe_send(message.chat.id, f"{pe('cross')} Format: <code>Label | url/callback | VALUE | on/off</code>")
+            return
+        btn_type = parts[1].lower()
+        if btn_type not in {"url", "callback"}:
+            safe_send(message.chat.id, f"{pe('cross')} Type must be url or callback!")
+            return
+        row = {"label": parts[0], "type": btn_type, "value": parts[2], "active": parts[3].lower() in {"on", "yes", "1", "true", "active"}}
+        buttons = get_extra_join_buttons()
+        buttons.append(row)
+        save_extra_join_buttons(buttons)
+        clear_state(user_id)
+        log_admin_action(user_id, "add_extra_button", f"Added extra button {parts[0]}")
+        safe_send(message.chat.id, f"{pe('check')} Extra button added successfully!")
+        return
+
+    if state == "admin_edit_extra_button":
+        data = get_state_data(user_id)
+        parts = [x.strip() for x in text.split('|')]
+        if len(parts) < 4:
+            safe_send(message.chat.id, f"{pe('cross')} Format: <code>Label | url/callback | VALUE | on/off</code>")
+            return
+        btn_type = parts[1].lower()
+        if btn_type not in {"url", "callback"}:
+            safe_send(message.chat.id, f"{pe('cross')} Type must be url or callback!")
+            return
+        try:
+            idx = int(data.get("index", -1))
+        except Exception:
+            idx = -1
+        buttons = get_extra_join_buttons()
+        if idx < 0 or idx >= len(buttons):
+            clear_state(user_id)
+            safe_send(message.chat.id, f"{pe('cross')} Button not found!")
+            return
+        buttons[idx] = {"label": parts[0], "type": btn_type, "value": parts[2], "active": parts[3].lower() in {"on", "yes", "1", "true", "active"}}
+        save_extra_join_buttons(buttons)
+        clear_state(user_id)
+        log_admin_action(user_id, "edit_extra_button", f"Edited extra button #{idx+1}")
+        safe_send(message.chat.id, f"{pe('check')} Extra button updated!")
         return
 
     # ======= ADMIN TASK STATES =======

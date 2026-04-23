@@ -95,6 +95,13 @@ DEFAULT_SETTINGS = {
     "inactivity_min_balance_floor": 1,
     "inactivity_definition": "no_referral_or_bonus_claim",
     "game_daily_bonus_cooldown_hours": 24,
+    "daily_withdraw_limit": 2,
+    "join_image": "https://advisory-brown-r63twvnsdu.edgeone.app/c693132c-cd1f-4a81-9b5e-8b8f042e490b.png",
+    "join_request_url": REQUEST_CHANNEL,
+    "join_channels": [
+        {"label": "Join Channel 1", "url": REQUEST_CHANNEL, "chat_id": 0, "force_join": False, "active": True}
+    ],
+    "extra_join_buttons": [],
 }
 
 PE = {
@@ -483,6 +490,30 @@ def init_db():
             (key, json.dumps(value))
         )
 
+    try:
+        existing_join_channels = json.loads((c.execute("SELECT value FROM settings WHERE key='join_channels'").fetchone() or {"value": "[]"})["value"])
+    except Exception:
+        existing_join_channels = []
+    if not existing_join_channels:
+        seed_channels = []
+        for idx, channel_id in enumerate(FORCE_JOIN_CHANNELS, 1):
+            seed_channels.append({
+                "label": f"Join Channel {idx}",
+                "url": REQUEST_CHANNEL,
+                "chat_id": int(channel_id),
+                "force_join": True,
+                "active": True,
+            })
+        if not seed_channels and REQUEST_CHANNEL:
+            seed_channels.append({
+                "label": "Main Channel",
+                "url": REQUEST_CHANNEL,
+                "chat_id": 0,
+                "force_join": False,
+                "active": True,
+            })
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("join_channels", json.dumps(seed_channels)))
+
     c.execute("UPDATE users SET welcome_bonus_paid=0 WHERE welcome_bonus_paid IS NULL")
     c.execute("UPDATE users SET bonus_balance=0 WHERE bonus_balance IS NULL")
     c.execute("UPDATE users SET total_referral_earnings=0 WHERE total_referral_earnings IS NULL")
@@ -570,6 +601,97 @@ def set_setting(key, value):
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
             ("max_withdraw_per_day", json.dumps(value))
         )
+
+def get_json_setting_list(key, fallback=None):
+    value = get_setting(key)
+    if isinstance(value, list):
+        return value
+    return list(fallback or [])
+
+
+def normalize_channel_button(item):
+    item = item or {}
+    label = str(item.get("label") or "Join").strip()[:64] or "Join"
+    url = str(item.get("url") or "").strip()
+    try:
+        chat_id = int(item.get("chat_id") or 0)
+    except Exception:
+        chat_id = 0
+    return {
+        "label": label,
+        "url": url,
+        "chat_id": chat_id,
+        "force_join": bool(item.get("force_join")),
+        "active": bool(item.get("active", True)),
+    }
+
+
+def normalize_extra_button(item):
+    item = item or {}
+    label = str(item.get("label") or "Open").strip()[:64] or "Open"
+    button_type = str(item.get("type") or "url").strip().lower()
+    if button_type not in {"url", "callback"}:
+        button_type = "url"
+    value = str(item.get("value") or item.get("url") or "").strip()
+    return {
+        "label": label,
+        "type": button_type,
+        "value": value,
+        "active": bool(item.get("active", True)),
+    }
+
+
+def get_join_channels():
+    rows = []
+    for item in get_json_setting_list("join_channels", DEFAULT_SETTINGS.get("join_channels", [])):
+        norm = normalize_channel_button(item)
+        if norm["url"]:
+            rows.append(norm)
+    return rows
+
+
+def save_join_channels(rows):
+    set_setting("join_channels", [normalize_channel_button(r) for r in rows])
+
+
+def get_extra_join_buttons():
+    rows = []
+    for item in get_json_setting_list("extra_join_buttons", DEFAULT_SETTINGS.get("extra_join_buttons", [])):
+        norm = normalize_extra_button(item)
+        if norm["value"]:
+            rows.append(norm)
+    return rows
+
+
+def save_extra_join_buttons(rows):
+    set_setting("extra_join_buttons", [normalize_extra_button(r) for r in rows])
+
+
+def get_join_request_url():
+    return str(get_setting("join_request_url") or REQUEST_CHANNEL).strip()
+
+
+def get_join_image():
+    return str(get_setting("join_image") or DEFAULT_SETTINGS.get("join_image", "")).strip()
+
+
+def build_join_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    request_url = get_join_request_url()
+    if request_url:
+        markup.add(types.InlineKeyboardButton("🔏 Request / Main Link", url=request_url))
+    active_channels = [row for row in get_join_channels() if row.get("active")]
+    buttons = [types.InlineKeyboardButton(row["label"], url=row["url"]) for row in active_channels if row.get("url")]
+    for i in range(0, len(buttons), 2):
+        markup.add(*buttons[i:i+2])
+    for row in [x for x in get_extra_join_buttons() if x.get("active")]:
+        if row["type"] == "callback" and row["value"]:
+            markup.add(types.InlineKeyboardButton(row["label"], callback_data=row["value"][:64]))
+        elif row["value"]:
+            markup.add(types.InlineKeyboardButton(row["label"], url=row["value"]))
+    markup.add(types.InlineKeyboardButton("🔐Joined - Verify", callback_data="verify_join"))
+    return markup
+
 
 def get_withdraw_referral_requirement():
     enabled = bool(get_setting("withdraw_referral_requirement_enabled"))
@@ -1205,6 +1327,10 @@ def get_admin_keyboard():
         types.KeyboardButton("⚙️ Settings"),
     )
     markup.add(
+        types.KeyboardButton("📣 Channel Panel"),
+        types.KeyboardButton("🏧 WD Control"),
+    )
+    markup.add(
         types.KeyboardButton("🧠 Advanced Settings"),
     )
     markup.add(
@@ -1226,43 +1352,48 @@ def get_admin_keyboard():
 
 # ======================== FORCE JOIN ========================
 def check_force_join(user_id):
-    for channel in FORCE_JOIN_CHANNELS:
+    active_force_channels = [row for row in get_join_channels() if row.get("active") and row.get("force_join")]
+    if not active_force_channels:
+        active_force_channels = [
+            {"chat_id": int(channel), "label": "Join", "url": "", "force_join": True, "active": True}
+            for channel in FORCE_JOIN_CHANNELS
+        ]
+
+    for channel in active_force_channels:
+        chat_id = int(channel.get("chat_id") or 0)
+        if not chat_id:
+            continue
         try:
-            member = bot.get_chat_member(channel, user_id)
+            member = bot.get_chat_member(chat_id, user_id)
             if member.status in ["left", "kicked"]:
                 return False
         except Exception as e:
-            print(f"Force join check error for {channel}: {e}")
+            print(f"Force join check error for {chat_id}: {e}")
             return False
     return True
 
 def send_join_message(chat_id):
-    join_image = "https://advisory-brown-r63twvnsdu.edgeone.app/c693132c-cd1f-4a81-9b5e-8b8f042e490b.png"
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(types.InlineKeyboardButton("🔏 Join", url=REQUEST_CHANNEL))
-    channel_buttons = [
-        types.InlineKeyboardButton("🔒 Join", url="https://t.me/+lHAg49fkRIM5YjE9"),
-        types.InlineKeyboardButton("🔒 Join", url="https://t.me/+XBK1G9ysDjxjNTU1"),
-        types.InlineKeyboardButton("🔒 Join", url="https://t.me/+YhIhMnjehSdlNjE9"),
-        types.InlineKeyboardButton("🔒 Join", url="https://t.me/+HAHlWdwdN91jMGM1"),
-        types.InlineKeyboardButton("🔒 Join", url="https://t.me/+RjS8jgZTCd0yMTQ1"),
-        ]
-    markup.add(*channel_buttons[:2])
-    markup.add(*channel_buttons[2:4])
-    markup.add(*channel_buttons[4:])
-    markup.add(types.InlineKeyboardButton("🔐Joined - Verify", callback_data="verify_join"))
+    join_image = get_join_image()
+    active_channels = [row for row in get_join_channels() if row.get("active")]
+    force_count = len([row for row in active_channels if row.get("force_join")])
+    extra_count = len([row for row in get_extra_join_buttons() if row.get("active")])
     caption = (
         f"{pe('warning')} <b>Join Required</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{pe('arrow')} Please join all channels below first.\n"
+        f"{pe('arrow')} Please open the buttons below and complete required joins.\n"
         f"{pe('info')} After joining, tap <b>🔐Joined - Verify</b>.\n\n"
-        f"{pe('excl')} <b>Note:</b> Force join is applied on all the Channels.\n"
+        f"{pe('shield')} <b>Force Join Channels:</b> {force_count}\n"
+        f"{pe('link')} <b>Other Buttons:</b> {max(0, len(active_channels) - force_count) + extra_count}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
+    markup = build_join_keyboard()
     try:
-        bot.send_photo(chat_id, join_image, caption=caption, parse_mode="HTML", reply_markup=markup)
+        if join_image:
+            bot.send_photo(chat_id, join_image, caption=caption, parse_mode="HTML", reply_markup=markup)
+        else:
+            bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=markup)
     except Exception as e:
-        print(f"send_join_message photo error: {e}")
+        print(f"send_join_message error: {e}")
         bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=markup)
 
 # ======================== NOTIFICATIONS ========================
