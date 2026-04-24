@@ -1202,7 +1202,7 @@ class AntiCheatSystem:
 
         return self.safe_send(
             chat_id,
-            f"{self.pe(shield)} <b>Advanced Verification</b> {self.pe(verify)}\n"
+            f"{self.pe('shield')} <b>Advanced Verification</b> {self.pe('verify')}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"{self.pe('warning')} <b>Action Required!</b>\n"
             f"{self.pe('info')} Complete verification to unlock your reward.\n\n"
