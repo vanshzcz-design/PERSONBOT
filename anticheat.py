@@ -72,7 +72,7 @@ def default_anticheat_settings() -> Dict[str, Any]:
         "same_ip_soft_limit": 1,
         "same_ip_hard_limit": 2,
         "same_fp_soft_limit": 1,
-        "same_fp_hard_limit": 2,
+        "same_fp_hard_limit": 1,
         "rate_limit_5m_per_ip": 5,
         "rate_limit_1h_per_ip": 20,
         "rate_limit_5m_per_user": 4,
@@ -312,7 +312,10 @@ def create_verification_app(
             verification_note TEXT DEFAULT '',
             flagged_for_review INTEGER DEFAULT 0,
             referral_hold_until TEXT DEFAULT '',
-            last_verification_at TEXT DEFAULT ''
+            last_verification_at TEXT DEFAULT '',
+            last_join_message_id INTEGER DEFAULT 0,
+            last_verify_message_id INTEGER DEFAULT 0,
+            last_welcome_message_id INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS settings (
@@ -361,6 +364,9 @@ def create_verification_app(
             "ALTER TABLE users ADD COLUMN total_referral_earnings REAL DEFAULT 0",
             "ALTER TABLE users ADD COLUMN last_active_at TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN auto_welcome_sent INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN last_join_message_id INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN last_verify_message_id INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN last_welcome_message_id INTEGER DEFAULT 0",
         ]
         for stmt in alter_statements:
             try:
@@ -394,7 +400,11 @@ def create_verification_app(
         conn.close()
         if not row:
             return default_anticheat_settings()
-        return safe_json_loads(row["value"], default_anticheat_settings())
+        cfg = default_anticheat_settings()
+        cfg.update(safe_json_loads(row["value"], {}))
+        cfg["same_fp_soft_limit"] = 1
+        cfg["same_fp_hard_limit"] = 1
+        return cfg
 
     def get_real_ip() -> str:
         forwarded_for = request.headers.get("X-Forwarded-For", "")
@@ -460,6 +470,36 @@ def create_verification_app(
         if telegram_api("sendPhoto", payload):
             return True
         return send_text_message(chat_id, caption, reply_markup=reply_markup)
+
+    def delete_stored_telegram_messages(user_row: sqlite3.Row, fields: Optional[List[str]] = None) -> None:
+        fields = fields or ["last_join_message_id", "last_verify_message_id", "last_welcome_message_id"]
+        cleared: List[str] = []
+        for field in fields:
+            try:
+                msg_id = int(user_row[field] or 0)
+            except Exception:
+                msg_id = 0
+            if msg_id:
+                telegram_api("deleteMessage", {"chat_id": int(user_row["user_id"]), "message_id": msg_id})
+                cleared.append(field)
+        if cleared:
+            conn2 = get_db()
+            cur2 = conn2.cursor()
+            set_sql = ", ".join([field + "=0" for field in cleared])
+            cur2.execute("UPDATE users SET " + set_sql + " WHERE user_id=?", (int(user_row["user_id"]),))
+            conn2.commit()
+            conn2.close()
+
+    def send_verification_failed_continue(user_id: int, reason: str) -> bool:
+        url = f"https://t.me/{bot_username}?start=1" if bot_username else ""
+        markup = {"inline_keyboard": [[{"text": "▶️ Continue /start", "url": url}]]} if url else None
+        return send_text_message(
+            user_id,
+            "❌ <b>Verification failed.</b>\n\n"
+            f"Reason: {reason}\n\n"
+            "Tap the button below to continue with /start.",
+            reply_markup=markup,
+        )
 
     def build_main_keyboard(user_id: int) -> Dict[str, Any]:
         keyboard = [
@@ -589,6 +629,8 @@ def create_verification_app(
         if not user_row:
             conn.close()
             return False
+
+        delete_stored_telegram_messages(user_row, ["last_join_message_id", "last_verify_message_id", "last_welcome_message_id"])
 
         if not auto_welcome:
             conn.close()
@@ -726,8 +768,8 @@ def create_verification_app(
             score += 25 + (fp_uses * 15)
             reasons.append(f"Fingerprint reused by {fp_uses} verified account(s)")
         if fp_uses >= cfg["same_fp_hard_limit"]:
-            score += 15
-            reasons.append("Fingerprint crossed hard limit")
+            score = max(score + 15, int(cfg.get("fraud_block_threshold", 80)))
+            reasons.append("Device already used by another verified account")
 
         if ip_5m >= cfg["rate_limit_5m_per_ip"]:
             score += 20
@@ -755,6 +797,7 @@ def create_verification_app(
 
         if not user:
             log_attempt(user_id, ip_address, fingerprint_hash, user_agent, "failed", "User not found", 100)
+            send_verification_failed_continue(user_id, "User not found in database.")
             return False, "User not found in database."
 
         if int(user["ip_verified"] or 0) == 1:
@@ -805,6 +848,7 @@ def create_verification_app(
             conn.commit()
             conn.close()
             log_attempt(user_id, ip_address, fingerprint_hash, user_agent, "failed", verification_note, score)
+            send_verification_failed_continue(user_id, verification_note)
             return False, f"Verification blocked. Reason: {verification_note}"
 
         hold_until = (datetime.utcnow() + timedelta(minutes=int(cfg["referral_hold_minutes"]))).strftime("%Y-%m-%d %H:%M:%S")
@@ -978,6 +1022,9 @@ class AntiCheatSystem:
             "ALTER TABLE users ADD COLUMN flagged_for_review INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN referral_hold_until TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN last_verification_at TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN last_join_message_id INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN last_verify_message_id INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN last_welcome_message_id INTEGER DEFAULT 0",
         ]
         existing_columns = {row["name"] for row in self.db_execute("PRAGMA table_info(users)", fetch=True) or []}
         for stmt in alter_statements:
@@ -1007,7 +1054,11 @@ class AntiCheatSystem:
         )
         if not row:
             return default_anticheat_settings()
-        return safe_json_loads(row["value"], default_anticheat_settings())
+        cfg = default_anticheat_settings()
+        cfg.update(safe_json_loads(row["value"], {}))
+        cfg["same_fp_soft_limit"] = 1
+        cfg["same_fp_hard_limit"] = 1
+        return cfg
 
     def save_anti_settings(self, cfg: Dict[str, Any]) -> None:
         self.db_execute(
@@ -1136,11 +1187,10 @@ class AntiCheatSystem:
 
         return True, "Eligible"
 
-    def send_ip_verify_message(self, chat_id: int, user_id: int) -> None:
+    def send_ip_verify_message(self, chat_id: int, user_id: int):
         self.public_base_url = normalize_public_base_url(self.public_base_url)
         if not self.public_base_url:
-            self.safe_send(chat_id, "❌ IP verification is not configured. Please set a valid HTTPS PUBLIC_BASE_URL.")
-            return
+            return self.safe_send(chat_id, "❌ IP verification is not configured. Please set a valid HTTPS PUBLIC_BASE_URL.")
 
         markup = types.InlineKeyboardMarkup()
         markup.add(
@@ -1150,9 +1200,9 @@ class AntiCheatSystem:
             )
         )
 
-        self.safe_send(
+        return self.safe_send(
             chat_id,
-            f"{self.pe('shield')} <b>Advanced Verification</b> {self.pe('verify')}\n"
+            f"{self.pe(shield)} <b>Advanced Verification</b> {self.pe(verify)}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"{self.pe('warning')} <b>Action Required!</b>\n"
             f"{self.pe('info')} Complete verification to unlock your reward.\n\n"

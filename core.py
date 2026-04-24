@@ -95,6 +95,7 @@ DEFAULT_SETTINGS = {
     "inactivity_min_balance_floor": 1,
     "inactivity_definition": "no_referral_or_bonus_claim",
     "game_daily_bonus_cooldown_hours": 24,
+    "daily_withdraw_limit": 2,
 }
 
 PE = {
@@ -298,7 +299,10 @@ def init_db():
             welcome_bonus_paid INTEGER DEFAULT 0,
             bonus_balance REAL DEFAULT 0,
             last_active_at TEXT DEFAULT '',
-            total_referral_earnings REAL DEFAULT 0
+            total_referral_earnings REAL DEFAULT 0,
+            last_join_message_id INTEGER DEFAULT 0,
+            last_verify_message_id INTEGER DEFAULT 0,
+            last_welcome_message_id INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS withdrawals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -447,6 +451,15 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN total_referral_earnings REAL DEFAULT 0")
     except:
         pass
+    for col in (
+        "last_join_message_id INTEGER DEFAULT 0",
+        "last_verify_message_id INTEGER DEFAULT 0",
+        "last_welcome_message_id INTEGER DEFAULT 0",
+    ):
+        try:
+            c.execute(f"ALTER TABLE users ADD COLUMN {col}")
+        except:
+            pass
     try:
         c.execute("ALTER TABLE withdrawals ADD COLUMN method TEXT DEFAULT 'upi'")
     except:
@@ -1011,7 +1024,9 @@ def generate_txn_id():
     return "TXN" + ''.join(random.choices(string.digits, k=10))
 #=================ip verify================
 def send_ip_verify_message(chat_id, user_id):
-    anticheat.send_ip_verify_message(chat_id, user_id)
+    sent = anticheat.send_ip_verify_message(chat_id, user_id)
+    remember_temp_message(user_id, "last_verify_message_id", sent)
+    return sent
 
 # ======================== ADMIN MANAGEMENT ========================
 def is_admin(user_id):
@@ -1094,6 +1109,43 @@ def safe_answer(call, text="", alert=False):
         bot.answer_callback_query(call.id, text, show_alert=alert)
     except:
         pass
+
+def safe_delete_message(chat_id, message_id):
+    try:
+        if message_id:
+            bot.delete_message(chat_id, int(message_id))
+            return True
+    except Exception as e:
+        print(f"safe_delete_message error: {e}")
+    return False
+
+def remember_temp_message(user_id, field, sent_message):
+    allowed = {"last_join_message_id", "last_verify_message_id", "last_welcome_message_id"}
+    if field not in allowed or not sent_message:
+        return
+    try:
+        db_execute(f"UPDATE users SET {field}=? WHERE user_id=?", (int(sent_message.message_id), int(user_id)))
+    except Exception as e:
+        print(f"remember_temp_message error: {e}")
+
+def delete_user_temp_messages(user_id, chat_id=None, fields=None):
+    user = get_user(user_id)
+    if not user:
+        return
+    fields = fields or ("last_join_message_id", "last_verify_message_id")
+    target_chat = chat_id or user_id
+    changed = []
+    for field in fields:
+        try:
+            mid = int(user[field] or 0)
+        except Exception:
+            mid = 0
+        if mid:
+            safe_delete_message(target_chat, mid)
+            changed.append(field)
+    if changed:
+        sets = ", ".join([f"{f}=0" for f in changed])
+        db_execute(f"UPDATE users SET {sets} WHERE user_id=?", (int(user_id),))
 
 
 # ======================== SYSTEMS INIT ========================
@@ -1260,10 +1312,10 @@ def send_join_message(chat_id):
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
     try:
-        bot.send_photo(chat_id, join_image, caption=caption, parse_mode="HTML", reply_markup=markup)
+        return bot.send_photo(chat_id, join_image, caption=caption, parse_mode="HTML", reply_markup=markup)
     except Exception as e:
         print(f"send_join_message photo error: {e}")
-        bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=markup)
+        return bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=markup)
 
 # ======================== NOTIFICATIONS ========================
 def send_public_withdrawal_notification(user_id, amount, upi_id, status, txn_id=""):

@@ -729,6 +729,7 @@ def show_settings(chat_id):
     gf_en = get_setting("gift_enabled")
     mn = get_setting("bot_maintenance")
     tk_en = get_setting("tasks_enabled")
+    daily_wd_limit = withdraw_limit.get_daily_limit()
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton(f"💰 Per Refer: ₹{pr}", callback_data="s_per_refer"),
@@ -740,6 +741,9 @@ def show_settings(chat_id):
     )
     markup.add(
         types.InlineKeyboardButton(f"📈 Max WD: ₹{mx}", callback_data="s_max_wd"),
+        types.InlineKeyboardButton(f"🔢 WD Limit: {daily_wd_limit}/day", callback_data="s_daily_wd_limit"),
+    )
+    markup.add(
         types.InlineKeyboardButton(f"⏰ Time: {ws}-{we}h", callback_data="s_wd_time"),
     )
     markup.add(
@@ -816,6 +820,10 @@ def s_daily(call):
 @bot.callback_query_handler(func=lambda call: call.data == "s_max_wd")
 def s_max_wd(call):
     settings_ask(call, "admin_set_max_withdraw", f"{pe('pencil')} Enter new Max Withdraw Per Day (₹):")
+
+@bot.callback_query_handler(func=lambda call: call.data == "s_daily_wd_limit")
+def s_daily_wd_limit(call):
+    settings_ask(call, "admin_set_daily_withdraw_limit", f"{pe('pencil')} Enter daily withdrawal count limit per user:\nExample: <code>2</code>")
 
 @bot.callback_query_handler(func=lambda call: call.data == "s_wd_ref_count")
 def s_wd_ref_count(call):

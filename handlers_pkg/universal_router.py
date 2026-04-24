@@ -803,6 +803,19 @@ def universal_handler(message):
         safe_send(message.chat.id, f"{pe('check')} Referral level {level} set to {mode} {value}")
         return
 
+    if state == "admin_set_daily_withdraw_limit":
+        try:
+            val = int(text)
+            if val < 1:
+                raise ValueError
+        except:
+            safe_send(message.chat.id, f"{pe('cross')} Enter valid number, minimum 1!")
+            return
+        clear_state(user_id)
+        saved = withdraw_limit.set_daily_limit(val)
+        safe_send(message.chat.id, f"{pe('check')} Daily withdrawal limit = {saved} per user")
+        return
+
     if state == "admin_set_max_withdraw":
         try:
             val = float(text)
