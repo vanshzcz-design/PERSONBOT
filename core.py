@@ -95,11 +95,10 @@ DEFAULT_SETTINGS = {
     "inactivity_min_balance_floor": 1,
     "inactivity_definition": "no_referral_or_bonus_claim",
     "game_daily_bonus_cooldown_hours": 24,
-    "one_device_one_account_enabled": True,
+    "one_device_one_user_enabled": True,
     "multi_account_warning_enabled": True,
-    "multi_account_deduction_enabled": True,
-    "multi_account_deduction_percent": 10,
-    "multi_account_max_accounts_per_device": 1,
+    "multi_account_penalty_enabled": True,
+    "multi_account_penalty_percent": 10,
 }
 
 PE = {
@@ -303,13 +302,7 @@ def init_db():
             welcome_bonus_paid INTEGER DEFAULT 0,
             bonus_balance REAL DEFAULT 0,
             last_active_at TEXT DEFAULT '',
-            total_referral_earnings REAL DEFAULT 0,
-            device_fingerprint TEXT DEFAULT '',
-            multi_account_warning_sent INTEGER DEFAULT 0,
-            multi_account_deduction_count INTEGER DEFAULT 0,
-            multi_account_last_penalty_at TEXT DEFAULT '',
-            last_join_msg_id INTEGER DEFAULT 0,
-            last_verify_msg_id INTEGER DEFAULT 0
+            total_referral_earnings REAL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS withdrawals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -458,30 +451,22 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN total_referral_earnings REAL DEFAULT 0")
     except:
         pass
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN device_fingerprint TEXT DEFAULT ''")
-    except:
-        pass
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN multi_account_warning_sent INTEGER DEFAULT 0")
-    except:
-        pass
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN multi_account_deduction_count INTEGER DEFAULT 0")
-    except:
-        pass
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN multi_account_last_penalty_at TEXT DEFAULT ''")
-    except:
-        pass
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN last_join_msg_id INTEGER DEFAULT 0")
-    except:
-        pass
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN last_verify_msg_id INTEGER DEFAULT 0")
-    except:
-        pass
+
+    for stmt in [
+        "ALTER TABLE users ADD COLUMN fingerprint_hash TEXT DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN first_verified_ip TEXT DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN latest_ip TEXT DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN multi_account_warned INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN multi_account_penalty_count INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN verification_status TEXT DEFAULT 'pending'",
+        "ALTER TABLE users ADD COLUMN verification_note TEXT DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN auto_welcome_sent INTEGER DEFAULT 0",
+    ]:
+        try:
+            c.execute(stmt)
+        except:
+            pass
+
     try:
         c.execute("ALTER TABLE withdrawals ADD COLUMN method TEXT DEFAULT 'upi'")
     except:
@@ -521,14 +506,13 @@ def init_db():
     c.execute("UPDATE users SET welcome_bonus_paid=0 WHERE welcome_bonus_paid IS NULL")
     c.execute("UPDATE users SET bonus_balance=0 WHERE bonus_balance IS NULL")
     c.execute("UPDATE users SET total_referral_earnings=0 WHERE total_referral_earnings IS NULL")
-    c.execute("UPDATE users SET multi_account_warning_sent=0 WHERE multi_account_warning_sent IS NULL")
-    c.execute("UPDATE users SET multi_account_deduction_count=0 WHERE multi_account_deduction_count IS NULL")
 
-    # Force redeem-code withdrawal rules from code so old DB values do not keep overriding them
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("max_single_withdraw_amount", (c.execute("SELECT value FROM settings WHERE key='max_single_withdraw_amount'").fetchone() or {"value": json.dumps(DEFAULT_SETTINGS["max_single_withdraw_amount"])} )["value"]))
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("redeem_min_withdraw", json.dumps(DEFAULT_SETTINGS["redeem_min_withdraw"])))
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("redeem_multiple_of", json.dumps(DEFAULT_SETTINGS["redeem_multiple_of"])))
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("redeem_gst_cut", json.dumps(DEFAULT_SETTINGS["redeem_gst_cut"])))
+    # Keep existing admin settings; only seed missing redeem-code withdrawal rules.
+    for key in ("max_single_withdraw_amount", "redeem_min_withdraw", "redeem_multiple_of", "redeem_gst_cut"):
+        c.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+            (key, json.dumps(DEFAULT_SETTINGS[key]))
+        )
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute(
@@ -991,72 +975,6 @@ def process_referral_bonus(user_id):
     return paid_any
 
 
-def get_device_account_count(fingerprint_hash, exclude_user_id=0):
-    fingerprint_hash = (fingerprint_hash or "").strip()
-    if not fingerprint_hash:
-        return 0
-    row = db_execute(
-        "SELECT COUNT(*) as c FROM users WHERE device_fingerprint=? AND user_id<>?",
-        (fingerprint_hash, int(exclude_user_id or 0)), fetchone=True
-    )
-    return int(row["c"] or 0) if row else 0
-
-
-def handle_multi_account_device(user_id, fingerprint_hash):
-    if not bool(get_setting("one_device_one_account_enabled")):
-        return True, ""
-    fingerprint_hash = (fingerprint_hash or "").strip()
-    if not fingerprint_hash:
-        return True, ""
-    try:
-        max_accounts = int(get_setting("multi_account_max_accounts_per_device") or 1)
-    except Exception:
-        max_accounts = 1
-    duplicates = get_device_account_count(fingerprint_hash, user_id)
-    if duplicates < max(1, max_accounts):
-        update_user(user_id, device_fingerprint=fingerprint_hash)
-        return True, ""
-
-    user = get_user(user_id)
-    if not user:
-        return False, "User not found."
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    update_user(user_id, device_fingerprint=fingerprint_hash)
-
-    if bool(get_setting("multi_account_warning_enabled")) and int(user["multi_account_warning_sent"] or 0) == 0:
-        update_user(user_id, multi_account_warning_sent=1)
-        try:
-            safe_send(
-                user_id,
-                f"{pe('warning')} <b>One Device = One Account</b> {pe('shield')}\n\n"
-                f"{pe('info')} Multiple accounts were detected on this device. This is your only warning.\n"
-                f"{pe('money')} Next time, <b>{float(get_setting('multi_account_deduction_percent') or 10):.0f}%</b> of your balance will be deducted automatically."
-            )
-        except Exception:
-            pass
-        return False, "Multiple accounts detected. One warning was sent."
-
-    if bool(get_setting("multi_account_deduction_enabled")):
-        pct = max(0.0, float(get_setting("multi_account_deduction_percent") or 10))
-        balance = float(user["balance"] or 0)
-        deduction = round(balance * pct / 100.0, 2)
-        new_balance = max(0.0, round(balance - deduction, 2))
-        update_user(user_id, balance=new_balance, multi_account_deduction_count=int(user["multi_account_deduction_count"] or 0) + 1, multi_account_last_penalty_at=now)
-        if deduction > 0:
-            db_execute("INSERT INTO bonus_history (user_id, amount, bonus_type, created_at) VALUES (?,?,?,?)", (user_id, -deduction, "multi_account_penalty", now))
-        try:
-            safe_send(
-                user_id,
-                f"{pe('no_entry')} <b>Multiple Account Penalty</b> {pe('warning')}\n\n"
-                f"{pe('money')} Deducted <b>₹{deduction:.2f}</b> ({pct:.0f}%) from your balance.\n"
-                f"{pe('info')} Only one account is allowed per device."
-            )
-        except Exception:
-            pass
-        return False, f"Multiple accounts detected. Deducted ₹{deduction:.2f}."
-    return False, "Multiple accounts detected."
-
-
 def evaluate_inactivity_penalty(user_id):
     if not bool(get_setting("inactivity_deduction_enabled")):
         return False, 0.0
@@ -1192,34 +1110,18 @@ def safe_edit(chat_id, message_id, text, **kwargs):
         except Exception:
             return None
 
-def delete_message_safely(chat_id, message_id):
-    try:
-        if chat_id and message_id:
-            bot.delete_message(chat_id, int(message_id))
-            return True
-    except Exception:
-        pass
-    return False
-
-
-def delete_tracked_user_message(user_id, chat_id, column_name):
-    if column_name not in {"last_join_msg_id", "last_verify_msg_id"}:
-        return False
-    user = get_user(user_id)
-    if not user:
-        return False
-    msg_id = int(user[column_name] or 0)
-    ok = delete_message_safely(chat_id or user_id, msg_id)
-    if msg_id:
-        update_user(user_id, **{column_name: 0})
-    return ok
-
-
 def safe_answer(call, text="", alert=False):
     try:
         bot.answer_callback_query(call.id, text, show_alert=alert)
     except:
         pass
+
+def safe_delete(chat_id, message_id):
+    try:
+        bot.delete_message(chat_id, message_id)
+        return True
+    except Exception:
+        return False
 
 
 # ======================== SYSTEMS INIT ========================
@@ -1386,7 +1288,7 @@ def send_join_message(chat_id):
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
     try:
-        return bot.send_photo(chat_id, join_image, caption=caption, parse_mode="HTML", reply_markup=markup)
+        bot.send_photo(chat_id, join_image, caption=caption, parse_mode="HTML", reply_markup=markup)
     except Exception as e:
         print(f"send_join_message photo error: {e}")
         bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=markup)

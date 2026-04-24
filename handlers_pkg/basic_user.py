@@ -46,12 +46,7 @@ def start_handler(message):
     mark_user_active(user_id)
 
     if not check_force_join(user_id):
-        msg = send_join_message(chat_id)
-        try:
-            if msg:
-                update_user(user_id, last_join_msg_id=msg.message_id)
-        except Exception:
-            pass
+        send_join_message(chat_id)
         return
 
     send_welcome(chat_id, user_id, first_name, is_new)
@@ -114,29 +109,19 @@ def verify_join(call):
     user_id = call.from_user.id
     if not check_force_join(user_id):
         safe_answer(call, "Join all channels first!", True)
-        msg = send_join_message(call.message.chat.id)
-        try:
-            if msg:
-                update_user(user_id, last_join_msg_id=msg.message_id)
-        except Exception:
-            pass
+        send_join_message(call.message.chat.id)
         return
     user = get_user(user_id)
     if not user:
         safe_answer(call, "Please send /start first.", True)
         return
     mark_user_active(user_id)
-    delete_tracked_user_message(user_id, call.message.chat.id, "last_join_msg_id")
-    delete_message_safely(call.message.chat.id, call.message.message_id)
     if is_ip_verification_required() and int(user["ip_verified"] or 0) != 1:
-        msg = send_ip_verify_message(call.message.chat.id, user_id)
-        try:
-            if msg:
-                update_user(user_id, last_verify_msg_id=msg.message_id)
-        except Exception:
-            pass
+        safe_delete(call.message.chat.id, call.message.message_id)
+        send_ip_verify_message(call.message.chat.id, user_id)
         safe_answer(call, "Open verification page")
         return
+    safe_delete(call.message.chat.id, call.message.message_id)
     process_referral_bonus(user_id)
     send_welcome(call.message.chat.id, user_id, call.from_user.first_name or "User")
     safe_answer(call, "Welcome sent!")
@@ -150,13 +135,32 @@ def check_ip_verified(call):
         safe_answer(call, "Please send /start first.", True)
         return
     if is_ip_verification_required() and int(user["ip_verified"] or 0) != 1:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("▶️ Continue /start", callback_data="restart_start"))
+        safe_send(
+            call.message.chat.id,
+            f"{pe('boom')} <b>Verification Failed!</b> {pe('warning')}\n\n"
+            f"{pe('cross')} Verification abhi complete nahi hui. Continue dabao aur /start se dobara try karo.",
+            reply_markup=markup
+        )
         safe_answer(call, "Still not verified!", True)
         return
-    delete_tracked_user_message(user_id, call.message.chat.id, "last_verify_msg_id")
-    delete_message_safely(call.message.chat.id, call.message.message_id)
+    safe_delete(call.message.chat.id, call.message.message_id)
     process_referral_bonus(user_id)
     send_welcome(call.message.chat.id, user_id, call.from_user.first_name or "User")
     safe_answer(call, "✅ Verification complete!")
+
+@bot.callback_query_handler(func=lambda call: call.data == "restart_start")
+def restart_start(call):
+    safe_delete(call.message.chat.id, call.message.message_id)
+    safe_answer(call)
+    try:
+        fake = call.message
+        fake.text = "/start"
+        fake.from_user = call.from_user
+        start_handler(fake)
+    except Exception:
+        safe_send(call.message.chat.id, "Please send /start to continue.")
 
 # ======================== BALANCE ========================
 @bot.message_handler(func=lambda m: m.text == "💰 Balance")

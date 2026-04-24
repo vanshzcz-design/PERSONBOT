@@ -729,9 +729,6 @@ def show_settings(chat_id):
     gf_en = get_setting("gift_enabled")
     mn = get_setting("bot_maintenance")
     tk_en = get_setting("tasks_enabled")
-    od_en = bool(get_setting("one_device_one_account_enabled"))
-    ma_pct = float(get_setting("multi_account_deduction_percent") or 10)
-    daily_wd_limit = withdraw_limit.get_daily_limit()
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton(f"💰 Per Refer: ₹{pr}", callback_data="s_per_refer"),
@@ -743,27 +740,19 @@ def show_settings(chat_id):
     )
     markup.add(
         types.InlineKeyboardButton(f"📈 Max WD: ₹{mx}", callback_data="s_max_wd"),
-        types.InlineKeyboardButton(f"📅 WD Limit: {daily_wd_limit}/day", callback_data="s_daily_wd_limit"),
-    )
-    markup.add(
         types.InlineKeyboardButton(f"⏰ Time: {ws}-{we}h", callback_data="s_wd_time"),
-        types.InlineKeyboardButton(f"🧬 Device Deduct: {ma_pct:.0f}%", callback_data="s_multi_pct"),
     )
     markup.add(
         types.InlineKeyboardButton(f"{'🟢' if wd_en else '🔴'} Withdraw", callback_data="tog_withdraw"),
-        types.InlineKeyboardButton(f"{'🟢' if od_en else '🔴'} One Device", callback_data="tog_one_device"),
-    )
-    markup.add(
         types.InlineKeyboardButton(f"{'🟢' if rf_en else '🔴'} Refer", callback_data="tog_refer"),
-        types.InlineKeyboardButton(f"{'🟢' if gf_en else '🔴'} Gift", callback_data="tog_gift"),
     )
     markup.add(
         types.InlineKeyboardButton(f"{'🟢' if wd_ref_en else '🔴'} WD Referral Gate", callback_data="tog_wd_ref_gate"),
         types.InlineKeyboardButton(f"👥 WD Refs: {wd_ref_count}", callback_data="s_wd_ref_count"),
     )
     markup.add(
+        types.InlineKeyboardButton(f"{'🟢' if gf_en else '🔴'} Gift", callback_data="tog_gift"),
         types.InlineKeyboardButton(f"{'🟢' if tk_en else '🔴'} Tasks", callback_data="tog_tasks"),
-        types.InlineKeyboardButton("🧹 Reset All Balances", callback_data="s_reset_all_balances"),
     )
     markup.add(
         types.InlineKeyboardButton(
@@ -786,6 +775,14 @@ def show_settings(chat_id):
     markup.add(
         types.InlineKeyboardButton("💸 Deduct Balance", callback_data="s_deduct_bal"),
         types.InlineKeyboardButton("👤 User Info", callback_data="dash_user_lookup"),
+    )
+    markup.add(
+        types.InlineKeyboardButton(f"🚫 One Device: {'ON' if bool(get_setting('one_device_one_user_enabled')) else 'OFF'}", callback_data="tog_one_device"),
+        types.InlineKeyboardButton(f"⚠️ Multi Deduct: {get_setting('multi_account_penalty_percent')}%", callback_data="s_multi_penalty"),
+    )
+    markup.add(
+        types.InlineKeyboardButton(f"🔒 Single WD: ₹{get_setting('max_single_withdraw_amount')}", callback_data="s_single_wd_limit"),
+        types.InlineKeyboardButton("🧹 Reset All Balances", callback_data="s_reset_balances"),
     )
     markup.add(
         types.InlineKeyboardButton("🧠 Advanced Settings", callback_data="open_advanced_settings"),
@@ -828,18 +825,44 @@ def s_daily(call):
 def s_max_wd(call):
     settings_ask(call, "admin_set_max_withdraw", f"{pe('pencil')} Enter new Max Withdraw Per Day (₹):")
 
+@bot.callback_query_handler(func=lambda call: call.data == "s_single_wd_limit")
+def s_single_wd_limit(call):
+    settings_ask(call, "admin_set_single_withdraw_limit", f"{pe('pencil')} Enter max single withdrawal amount (₹):")
+
+@bot.callback_query_handler(func=lambda call: call.data == "s_multi_penalty")
+def s_multi_penalty(call):
+    settings_ask(call, "admin_set_multi_penalty_percent", f"{pe('pencil')} Enter multi-account deduction percent (default 10):")
+
+@bot.callback_query_handler(func=lambda call: call.data == "tog_one_device")
+def tog_one_device(call):
+    if not is_admin(call.from_user.id): return
+    cur = bool(get_setting("one_device_one_user_enabled"))
+    set_setting("one_device_one_user_enabled", not cur)
+    safe_answer(call, f"One-device rule {'Enabled' if not cur else 'Disabled'}")
+    show_settings(call.message.chat.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "s_reset_balances")
+def s_reset_balances(call):
+    if not is_admin(call.from_user.id): return
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ YES, RESET BALANCES", callback_data="confirm_reset_balances"),
+        types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_action"),
+    )
+    safe_answer(call)
+    safe_send(call.message.chat.id, f"{pe('warning')} This will deduct/reset balance and bonus balance of all users to ₹0. Continue?", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "confirm_reset_balances")
+def confirm_reset_balances(call):
+    if not is_admin(call.from_user.id): return
+    db_execute("UPDATE users SET balance=0, bonus_balance=0")
+    log_admin_action(call.from_user.id, "reset_all_balances", "Set balance and bonus_balance to zero for all users")
+    safe_answer(call, "✅ All balances reset")
+    safe_send(call.message.chat.id, f"{pe('check')} <b>All user balances have been reset to ₹0.</b>")
+
 @bot.callback_query_handler(func=lambda call: call.data == "s_wd_ref_count")
 def s_wd_ref_count(call):
     settings_ask(call, "admin_set_withdraw_required_referrals", f"{pe('pencil')} Enter required referrals for withdrawal:")
-
-@bot.callback_query_handler(func=lambda call: call.data == "s_daily_wd_limit")
-def s_daily_wd_limit(call):
-    settings_ask(call, "admin_set_daily_withdraw_limit", f"{pe('pencil')} Enter daily withdrawal count limit per user:")
-
-@bot.callback_query_handler(func=lambda call: call.data == "s_multi_pct")
-def s_multi_pct(call):
-    settings_ask(call, "admin_set_multi_account_pct", f"{pe('pencil')} Enter multi-account deduction percent:")
-
 
 @bot.callback_query_handler(func=lambda call: call.data == "s_wd_time")
 def s_wd_time(call):
@@ -883,37 +906,6 @@ def tog_withdraw(call):
     set_setting("withdraw_enabled", not cur)
     safe_answer(call, f"Withdraw {'Enabled' if not cur else 'Disabled'}!")
     show_settings(call.message.chat.id)
-
-@bot.callback_query_handler(func=lambda call: call.data == "tog_one_device")
-def tog_one_device(call):
-    if not is_admin(call.from_user.id): return
-    cur = bool(get_setting("one_device_one_account_enabled"))
-    set_setting("one_device_one_account_enabled", not cur)
-    safe_answer(call, f"One device rule {'Enabled' if not cur else 'Disabled'}!")
-    show_settings(call.message.chat.id)
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "s_reset_all_balances")
-def s_reset_all_balances(call):
-    if not is_admin(call.from_user.id): return
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("✅ YES, RESET BALANCES", callback_data="confirm_reset_all_balances"),
-        types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_action"),
-    )
-    safe_answer(call)
-    safe_send(call.message.chat.id, f"{pe('warning')} <b>Reset balance of ALL users to ₹0?</b>\n\nThis only deducts wallet balances. It does not delete users or other data.", reply_markup=markup)
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "confirm_reset_all_balances")
-def confirm_reset_all_balances(call):
-    if not is_admin(call.from_user.id): return
-    row = db_execute("SELECT COUNT(*) as c, SUM(balance) as total FROM users WHERE balance > 0", fetchone=True) or {"c": 0, "total": 0}
-    db_execute("UPDATE users SET balance=0")
-    log_admin_action(call.from_user.id, "reset_all_balances", f"Reset balances for {row['c']} users; deducted ₹{row['total'] or 0:.2f}")
-    safe_answer(call, "✅ Balances reset!")
-    safe_send(call.message.chat.id, f"{pe('check')} Reset balances for <b>{row['c']}</b> users. Deducted total: <b>₹{row['total'] or 0:.2f}</b>")
-
 
 @bot.callback_query_handler(func=lambda call: call.data == "tog_wd_ref_gate")
 def tog_wd_ref_gate(call):
@@ -1344,6 +1336,13 @@ def adv_verification(call):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton(f"{'🟢' if enabled else '🔴'} Toggle IP Verification", callback_data="tog_ip_verify"),
+        types.InlineKeyboardButton(f"{'🟢' if bool(get_setting('one_device_one_user_enabled')) else '🔴'} One Device/User", callback_data="tog_one_device"),
+    )
+    markup.add(
+        types.InlineKeyboardButton(f"{'🟢' if bool(get_setting('multi_account_penalty_enabled')) else '🔴'} Multi Penalty", callback_data="tog_multi_penalty"),
+        types.InlineKeyboardButton(f"⚠️ Penalty: {get_setting('multi_account_penalty_percent')}%", callback_data="s_multi_penalty"),
+    )
+    markup.add(
         types.InlineKeyboardButton("🔁 Manual Verify Fallback", callback_data="noop_manual_verify"),
     )
     safe_send(call.message.chat.id, f"{pe('shield')} <b>Verification Control</b>\n\nIP verification: <b>{'ON' if enabled else 'OFF'}</b>\nAuto welcome after verify: <b>ON</b>\nManual verify button fallback: <b>ON</b>", reply_markup=markup)
@@ -1566,6 +1565,15 @@ def adv_inactivity_days(call):
 def adv_inactivity_floor(call):
     settings_ask(call, "admin_set_inactivity_floor", f"{pe('pencil')} Enter minimum balance floor:")
 
+
+@bot.callback_query_handler(func=lambda call: call.data == "tog_multi_penalty")
+def tog_multi_penalty(call):
+    if not is_admin(call.from_user.id):
+        return
+    cur = bool(get_setting("multi_account_penalty_enabled"))
+    set_setting("multi_account_penalty_enabled", not cur)
+    safe_answer(call, f"Multi-account penalty {'Enabled' if not cur else 'Disabled'}")
+    adv_verification(call)
 
 @bot.callback_query_handler(func=lambda call: call.data == "tog_ip_verify")
 def tog_ip_verify(call):

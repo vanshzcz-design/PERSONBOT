@@ -814,30 +814,28 @@ def universal_handler(message):
         safe_send(message.chat.id, f"{pe('check')} Max Withdraw/Day = ₹{val}")
         return
 
-    if state == "admin_set_daily_withdraw_limit":
-        try:
-            val = int(float(text))
-        except:
-            safe_send(message.chat.id, f"{pe('cross')} Enter valid whole number!")
-            return
-        val = max(0, val)
-        clear_state(user_id)
-        withdraw_limit.set_daily_limit(val)
-        safe_send(message.chat.id, f"{pe('check')} Daily withdrawal limit = {val} per user/day")
-        return
-
-    if state == "admin_set_multi_account_pct":
+    if state == "admin_set_single_withdraw_limit":
         try:
             val = float(text)
         except:
             safe_send(message.chat.id, f"{pe('cross')} Enter valid number!")
             return
-        val = max(0.0, min(100.0, val))
         clear_state(user_id)
-        set_setting("multi_account_deduction_percent", val)
-        safe_send(message.chat.id, f"{pe('check')} Multi-account deduction = {val}%")
+        set_setting("max_single_withdraw_amount", val)
+        safe_send(message.chat.id, f"{pe('check')} Max single withdrawal = ₹{val}")
         return
 
+    if state == "admin_set_multi_penalty_percent":
+        try:
+            val = float(text)
+        except:
+            safe_send(message.chat.id, f"{pe('cross')} Enter valid number!")
+            return
+        clear_state(user_id)
+        val = max(0.0, min(100.0, val))
+        set_setting("multi_account_penalty_percent", val)
+        safe_send(message.chat.id, f"{pe('check')} Multi-account deduction = {val}%")
+        return
 
     if state == "admin_set_withdraw_time":
         try:

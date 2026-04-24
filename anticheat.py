@@ -72,7 +72,7 @@ def default_anticheat_settings() -> Dict[str, Any]:
         "same_ip_soft_limit": 1,
         "same_ip_hard_limit": 2,
         "same_fp_soft_limit": 1,
-        "same_fp_hard_limit": 1,
+        "same_fp_hard_limit": 2,
         "rate_limit_5m_per_ip": 5,
         "rate_limit_1h_per_ip": 20,
         "rate_limit_5m_per_user": 4,
@@ -82,9 +82,6 @@ def default_anticheat_settings() -> Dict[str, Any]:
         "referral_hold_minutes": 10,
         "auto_flag_on_duplicate_ip": True,
         "auto_flag_on_duplicate_fp": True,
-        "one_device_one_account_enabled": True,
-        "multi_account_deduction_enabled": True,
-        "multi_account_deduction_percent": 10,
     }
 
 
@@ -316,10 +313,8 @@ def create_verification_app(
             flagged_for_review INTEGER DEFAULT 0,
             referral_hold_until TEXT DEFAULT '',
             last_verification_at TEXT DEFAULT '',
-            device_fingerprint TEXT DEFAULT '',
-            multi_account_warning_sent INTEGER DEFAULT 0,
-            multi_account_deduction_count INTEGER DEFAULT 0,
-            multi_account_last_penalty_at TEXT DEFAULT ''
+            multi_account_warned INTEGER DEFAULT 0,
+            multi_account_penalty_count INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS settings (
@@ -368,6 +363,8 @@ def create_verification_app(
             "ALTER TABLE users ADD COLUMN total_referral_earnings REAL DEFAULT 0",
             "ALTER TABLE users ADD COLUMN last_active_at TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN auto_welcome_sent INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN multi_account_warned INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN multi_account_penalty_count INTEGER DEFAULT 0",
         ]
         for stmt in alter_statements:
             try:
@@ -379,6 +376,16 @@ def create_verification_app(
             "INSERT OR IGNORE INTO anti_settings (key, value) VALUES (?, ?)",
             ("config", json.dumps(default_anticheat_settings()))
         )
+        for key, value in {
+            "one_device_one_user_enabled": True,
+            "multi_account_warning_enabled": True,
+            "multi_account_penalty_enabled": True,
+            "multi_account_penalty_percent": 10,
+        }.items():
+            cur.execute(
+                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                (key, json.dumps(value))
+            )
 
         conn.commit()
         conn.close()
@@ -645,15 +652,6 @@ def create_verification_app(
         )
         reply_markup = build_main_keyboard(user_id)
 
-        # delete verification prompt after success
-        try:
-            msg_id = int(user_row["last_verify_msg_id"] or 0)
-            if msg_id:
-                bot.delete_message(user_id, msg_id)
-                db_execute("UPDATE users SET last_verify_msg_id=0 WHERE user_id=?", (user_id,))
-        except Exception:
-            pass
-
         if welcome_image:
             return send_photo_message(user_id, welcome_image, caption, reply_markup=reply_markup)
         return send_text_message(user_id, caption, reply_markup=reply_markup)
@@ -765,40 +763,6 @@ def create_verification_app(
 
         return score, reasons
 
-    def local_multi_account_check(user_id: int, fingerprint_hash: str) -> Tuple[bool, str]:
-        if not bool(get_setting_value("one_device_one_account_enabled", True)):
-            return True, ""
-        if not fingerprint_hash:
-            return True, ""
-        existing = db_execute(
-            "SELECT COUNT(*) AS c FROM users WHERE device_fingerprint=? AND user_id<>?",
-            (fingerprint_hash, user_id), fetchone=True
-        )
-        if int(existing["c"] if existing else 0) <= 0:
-            db_execute("UPDATE users SET device_fingerprint=? WHERE user_id=?", (fingerprint_hash, user_id))
-            return True, ""
-        user = get_user(user_id)
-        if not user:
-            return False, "User not found."
-        db_execute("UPDATE users SET device_fingerprint=?, flagged_for_review=1, verification_status='flagged', verification_note=? WHERE user_id=?", (fingerprint_hash, "Multiple accounts from same device", user_id))
-        if bool(get_setting_value("multi_account_warning_enabled", True)) and int(user["multi_account_warning_sent"] or 0) == 0:
-            db_execute("UPDATE users SET multi_account_warning_sent=1 WHERE user_id=?", (user_id,))
-            try:
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("▶️ Continue /start", callback_data="check_ip_verified"))
-                safe_send(user_id, f"{pe('warning')} <b>One Device = One Account</b> {pe('shield')}\n\n{pe('info')} Multiple accounts were detected on this device. This is your only warning. Next time 10% of your balance will be deducted.", reply_markup=markup)
-            except Exception:
-                pass
-            return False, "Multiple accounts detected. One warning was sent."
-        if bool(get_setting_value("multi_account_deduction_enabled", True)):
-            pct = float(get_setting_value("multi_account_deduction_percent", 10) or 10)
-            bal = float(user["balance"] or 0)
-            deduction = round(bal * pct / 100.0, 2)
-            new_bal = max(0.0, round(bal - deduction, 2))
-            db_execute("UPDATE users SET balance=?, multi_account_deduction_count=COALESCE(multi_account_deduction_count,0)+1, multi_account_last_penalty_at=? WHERE user_id=?", (new_bal, utc_now_str(), user_id))
-            return False, f"Multiple accounts detected. Deducted ₹{deduction:.2f}."
-        return False, "Multiple accounts detected."
-
     def verify_user(user_id: int, ip_address: str, fingerprint_hash: str, user_agent: str) -> Tuple[bool, str]:
         cfg = get_anti_settings()
         user = get_user(user_id)
@@ -808,10 +772,83 @@ def create_verification_app(
             return False, "User not found in database."
 
         if int(user["ip_verified"] or 0) == 1:
-            db_execute("UPDATE users SET device_fingerprint=? WHERE user_id=? AND COALESCE(device_fingerprint,'')=''", (fingerprint_hash, user_id))
             log_attempt(user_id, ip_address, fingerprint_hash, user_agent, "success", "Already verified", int(user["fraud_score"] or 0))
             send_auto_welcome(user_id)
             return True, "Already verified."
+
+        if bool(get_setting_value("one_device_one_user_enabled", True)):
+            conn_check = get_db()
+            cur_check = conn_check.cursor()
+            cur_check.execute(
+                """
+                SELECT user_id FROM users
+                WHERE user_id<>? AND ip_verified=1
+                  AND (fingerprint_hash=? OR (first_verified_ip<>'' AND first_verified_ip=?) OR (ip_address<>'' AND ip_address=?))
+                LIMIT 1
+                """,
+                (user_id, fingerprint_hash, ip_address, ip_address)
+            )
+            existing_device_user = cur_check.fetchone()
+            if existing_device_user:
+                warned = int(user["multi_account_warned"] or 0)
+                balance = float(user["balance"] or 0)
+                penalty_percent = float(get_setting_value("multi_account_penalty_percent", 10) or 10)
+                if bool(get_setting_value("multi_account_warning_enabled", True)) and warned == 0:
+                    cur_check.execute(
+                        """
+                        UPDATE users
+                        SET multi_account_warned=1, latest_ip=?, fingerprint_hash=?,
+                            verification_status='blocked', verification_note=?, last_verification_at=?
+                        WHERE user_id=?
+                        """,
+                        (ip_address, fingerprint_hash, "Multiple accounts from the same device are not allowed.", utc_now_str(), user_id)
+                    )
+                    conn_check.commit()
+                    conn_check.close()
+                    log_attempt(user_id, ip_address, fingerprint_hash, user_agent, "failed", "Multi-account warning sent", 100)
+                    send_text_message(
+                        user_id,
+                        f"{pe('warning')} <b>Warning!</b> {pe('boom')}\n\n"
+                        f"{pe('no_entry')} Only <b>one account per device</b> is allowed.\n"
+                        f"{pe('excl')} If you try again with multiple accounts, <b>{penalty_percent:.0f}%</b> of your total balance will be deducted.",
+                        reply_markup={"inline_keyboard": [[{"text": "▶️ Continue /start", "url": f"https://t.me/{bot_username}?start=start"}]]}
+                    )
+                    return False, "Multiple accounts detected. Warning sent. Please continue from Telegram."
+
+                deduction = 0.0
+                if bool(get_setting_value("multi_account_penalty_enabled", True)) and balance > 0 and penalty_percent > 0:
+                    deduction = round(balance * penalty_percent / 100.0, 2)
+                    cur_check.execute(
+                        """
+                        UPDATE users
+                        SET balance=MAX(COALESCE(balance,0)-?, 0), multi_account_penalty_count=COALESCE(multi_account_penalty_count,0)+1,
+                            latest_ip=?, fingerprint_hash=?, verification_status='blocked', verification_note=?, last_verification_at=?
+                        WHERE user_id=?
+                        """,
+                        (deduction, ip_address, fingerprint_hash, f"Multi-account penalty deducted: {deduction}", utc_now_str(), user_id)
+                    )
+                else:
+                    cur_check.execute(
+                        """
+                        UPDATE users
+                        SET latest_ip=?, fingerprint_hash=?, verification_status='blocked', verification_note=?, last_verification_at=?
+                        WHERE user_id=?
+                        """,
+                        (ip_address, fingerprint_hash, "Multiple accounts from the same device are not allowed.", utc_now_str(), user_id)
+                    )
+                conn_check.commit()
+                conn_check.close()
+                log_attempt(user_id, ip_address, fingerprint_hash, user_agent, "failed", "Multi-account blocked", 100)
+                send_text_message(
+                    user_id,
+                    f"{pe('boom')} <b>Verification Failed!</b> {pe('warning')}\n\n"
+                    f"{pe('no_entry')} Multiple accounts from one device are not allowed.\n"
+                    f"{pe('money')} Penalty deducted: <b>₹{deduction:.2f}</b>" if deduction > 0 else
+                    f"{pe('boom')} <b>Verification Failed!</b> {pe('warning')}\n\n{pe('no_entry')} Multiple accounts from one device are not allowed.",
+                    reply_markup={"inline_keyboard": [[{"text": "▶️ Continue /start", "url": f"https://t.me/{bot_username}?start=start"}]]}
+                )
+                return False, "Multiple accounts from the same device are not allowed."
+            conn_check.close()
 
         score, reasons = compute_fraud_score(user_id, ip_address, fingerprint_hash, user_agent)
         reason_text = "; ".join(reasons) if reasons else "Clean verification"
@@ -856,22 +893,23 @@ def create_verification_app(
             conn.commit()
             conn.close()
             log_attempt(user_id, ip_address, fingerprint_hash, user_agent, "failed", verification_note, score)
+            send_text_message(
+                user_id,
+                f"{pe('boom')} <b>Verification Failed!</b> {pe('warning')}\n\n"
+                f"{pe('cross')} Reason: {verification_note}\n\n"
+                f"{pe('play')} Tap continue and start again.",
+                reply_markup={"inline_keyboard": [[{"text": "▶️ Continue /start", "url": f"https://t.me/{bot_username}?start=start"}]]}
+            )
             return False, f"Verification blocked. Reason: {verification_note}"
 
         hold_until = (datetime.utcnow() + timedelta(minutes=int(cfg["referral_hold_minutes"]))).strftime("%Y-%m-%d %H:%M:%S")
         first_verified_ip = user["first_verified_ip"] or ip_address
 
-        allowed_device, device_message = local_multi_account_check(user_id, fingerprint_hash)
-        if not allowed_device:
-            conn.close()
-            log_attempt(user_id, ip_address, fingerprint_hash, user_agent, "failed", device_message, max(score, int(cfg["fraud_block_threshold"])))
-            return False, device_message
-
         cur.execute(
             """
             UPDATE users
             SET ip_address=?, ip_verified=1, first_verified_ip=?, latest_ip=?,
-                fingerprint_hash=?, device_fingerprint=?, fraud_score=?, verification_status=?,
+                fingerprint_hash=?, fraud_score=?, verification_status=?,
                 verification_note=?, flagged_for_review=?, referral_hold_until=?,
                 last_verification_at=?
             WHERE user_id=?
@@ -880,7 +918,6 @@ def create_verification_app(
                 ip_address,
                 first_verified_ip,
                 ip_address,
-                fingerprint_hash,
                 fingerprint_hash,
                 score,
                 verification_status,
@@ -936,18 +973,6 @@ def create_verification_app(
 
         ok, message = verify_user(user_id, ip_address, fingerprint_hash, user_agent)
         if not ok:
-            try:
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("▶️ Continue /start", url=f"https://t.me/{bot_username}?start=start" if bot_username else "https://t.me/"))
-                safe_send(
-                    user_id,
-                    f"{pe('warning')} <b>Verification Failed</b> {pe('fire')} {pe('sparkle')}\n\n"
-                    f"❌ {message}\n\n"
-                    f"{pe('play')} Tap below to continue with /start.",
-                    reply_markup=markup
-                )
-            except Exception:
-                pass
             return render_template(
                 "verify.html",
                 page_state="error",
@@ -1209,7 +1234,8 @@ class AntiCheatSystem:
     def send_ip_verify_message(self, chat_id: int, user_id: int) -> None:
         self.public_base_url = normalize_public_base_url(self.public_base_url)
         if not self.public_base_url:
-            return self.safe_send(chat_id, "❌ IP verification is not configured. Please set a valid HTTPS PUBLIC_BASE_URL.")
+            self.safe_send(chat_id, "❌ IP verification is not configured. Please set a valid HTTPS PUBLIC_BASE_URL.")
+            return
 
         markup = types.InlineKeyboardMarkup()
         markup.add(
@@ -1219,7 +1245,7 @@ class AntiCheatSystem:
             )
         )
 
-        msg = self.safe_send(
+        self.safe_send(
             chat_id,
             f"{self.pe('shield')} <b>Advanced Verification</b> {self.pe('verify')}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1244,12 +1270,6 @@ class AntiCheatSystem:
             f"━━━━━━━━━━━━━━━━━━━━━━",
             reply_markup=markup
         )
-        try:
-            if msg:
-                self.update_user(user_id, last_verify_msg_id=msg.message_id)
-        except Exception:
-            pass
-        return msg
 
     # ----------------------------
     # Admin panel
@@ -1329,9 +1349,6 @@ class AntiCheatSystem:
             f"• same_ip_hard_limit: <b>{cfg['same_ip_hard_limit']}</b>\n"
             f"• same_fp_soft_limit: <b>{cfg['same_fp_soft_limit']}</b>\n"
             f"• same_fp_hard_limit: <b>{cfg['same_fp_hard_limit']}</b>\n"
-            f"• one_device_one_account_enabled: <b>{cfg.get('one_device_one_account_enabled', True)}</b>\n"
-            f"• multi_account_deduction_enabled: <b>{cfg.get('multi_account_deduction_enabled', True)}</b>\n"
-            f"• multi_account_deduction_percent: <b>{cfg.get('multi_account_deduction_percent', 10)}</b>\n"
             f"• rate_limit_5m_per_ip: <b>{cfg['rate_limit_5m_per_ip']}</b>\n"
             f"• rate_limit_1h_per_ip: <b>{cfg['rate_limit_1h_per_ip']}</b>\n"
             f"• rate_limit_5m_per_user: <b>{cfg['rate_limit_5m_per_user']}</b>\n"
