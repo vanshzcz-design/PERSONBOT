@@ -803,6 +803,26 @@ def universal_handler(message):
         safe_send(message.chat.id, f"{pe('check')} Referral level {level} set to {mode} {value}")
         return
 
+    if state == "admin_set_single_device_penalty_percent":
+        try:
+            val = float(text)
+        except:
+            safe_send(message.chat.id, f"{pe('cross')} Enter valid number!")
+            return
+        if val < 0 or val > 100:
+            safe_send(message.chat.id, f"{pe('cross')} Enter a percent between 0 and 100.")
+            return
+        clear_state(user_id)
+        set_setting("single_device_penalty_percent", val)
+        try:
+            cfg = anticheat.get_anti_settings()
+            cfg["single_device_penalty_percent"] = val
+            anticheat.save_anti_settings(cfg)
+        except Exception:
+            pass
+        safe_send(message.chat.id, f"{pe('check')} One-device penalty percent = {val:g}%")
+        return
+
     if state == "admin_set_max_withdraw":
         try:
             val = float(text)
@@ -812,29 +832,6 @@ def universal_handler(message):
         clear_state(user_id)
         set_setting("max_withdraw_per_day", val)
         safe_send(message.chat.id, f"{pe('check')} Max Withdraw/Day = ₹{val}")
-        return
-
-    if state == "admin_set_single_withdraw_limit":
-        try:
-            val = float(text)
-        except:
-            safe_send(message.chat.id, f"{pe('cross')} Enter valid number!")
-            return
-        clear_state(user_id)
-        set_setting("max_single_withdraw_amount", val)
-        safe_send(message.chat.id, f"{pe('check')} Max single withdrawal = ₹{val}")
-        return
-
-    if state == "admin_set_multi_penalty_percent":
-        try:
-            val = float(text)
-        except:
-            safe_send(message.chat.id, f"{pe('cross')} Enter valid number!")
-            return
-        clear_state(user_id)
-        val = max(0.0, min(100.0, val))
-        set_setting("multi_account_penalty_percent", val)
-        safe_send(message.chat.id, f"{pe('check')} Multi-account deduction = {val}%")
         return
 
     if state == "admin_set_withdraw_time":

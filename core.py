@@ -95,10 +95,9 @@ DEFAULT_SETTINGS = {
     "inactivity_min_balance_floor": 1,
     "inactivity_definition": "no_referral_or_bonus_claim",
     "game_daily_bonus_cooldown_hours": 24,
-    "one_device_one_user_enabled": True,
-    "multi_account_warning_enabled": True,
-    "multi_account_penalty_enabled": True,
-    "multi_account_penalty_percent": 10,
+    "single_device_enabled": True,
+    "single_device_penalty_enabled": True,
+    "single_device_penalty_percent": 10,
 }
 
 PE = {
@@ -302,7 +301,12 @@ def init_db():
             welcome_bonus_paid INTEGER DEFAULT 0,
             bonus_balance REAL DEFAULT 0,
             last_active_at TEXT DEFAULT '',
-            total_referral_earnings REAL DEFAULT 0
+            total_referral_earnings REAL DEFAULT 0,
+            multi_account_warning_sent INTEGER DEFAULT 0,
+            single_device_penalty_count INTEGER DEFAULT 0,
+            last_join_message_id INTEGER DEFAULT 0,
+            last_verify_message_id INTEGER DEFAULT 0,
+            last_welcome_message_id INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS withdrawals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -451,22 +455,17 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN total_referral_earnings REAL DEFAULT 0")
     except:
         pass
-
     for stmt in [
-        "ALTER TABLE users ADD COLUMN fingerprint_hash TEXT DEFAULT ''",
-        "ALTER TABLE users ADD COLUMN first_verified_ip TEXT DEFAULT ''",
-        "ALTER TABLE users ADD COLUMN latest_ip TEXT DEFAULT ''",
-        "ALTER TABLE users ADD COLUMN multi_account_warned INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN multi_account_penalty_count INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN verification_status TEXT DEFAULT 'pending'",
-        "ALTER TABLE users ADD COLUMN verification_note TEXT DEFAULT ''",
-        "ALTER TABLE users ADD COLUMN auto_welcome_sent INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN multi_account_warning_sent INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN single_device_penalty_count INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN last_join_message_id INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN last_verify_message_id INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN last_welcome_message_id INTEGER DEFAULT 0",
     ]:
         try:
             c.execute(stmt)
         except:
             pass
-
     try:
         c.execute("ALTER TABLE withdrawals ADD COLUMN method TEXT DEFAULT 'upi'")
     except:
@@ -507,12 +506,11 @@ def init_db():
     c.execute("UPDATE users SET bonus_balance=0 WHERE bonus_balance IS NULL")
     c.execute("UPDATE users SET total_referral_earnings=0 WHERE total_referral_earnings IS NULL")
 
-    # Keep existing admin settings; only seed missing redeem-code withdrawal rules.
-    for key in ("max_single_withdraw_amount", "redeem_min_withdraw", "redeem_multiple_of", "redeem_gst_cut"):
-        c.execute(
-            "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
-            (key, json.dumps(DEFAULT_SETTINGS[key]))
-        )
+    # Force redeem-code withdrawal rules from code so old DB values do not keep overriding them
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("max_single_withdraw_amount", (c.execute("SELECT value FROM settings WHERE key='max_single_withdraw_amount'").fetchone() or {"value": json.dumps(DEFAULT_SETTINGS["max_single_withdraw_amount"])} )["value"]))
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("redeem_min_withdraw", json.dumps(DEFAULT_SETTINGS["redeem_min_withdraw"])))
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("redeem_multiple_of", json.dumps(DEFAULT_SETTINGS["redeem_multiple_of"])))
+    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("redeem_gst_cut", json.dumps(DEFAULT_SETTINGS["redeem_gst_cut"])))
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.execute(
@@ -1116,13 +1114,54 @@ def safe_answer(call, text="", alert=False):
     except:
         pass
 
+
 def safe_delete(chat_id, message_id):
     try:
-        bot.delete_message(chat_id, message_id)
-        return True
-    except Exception:
-        return False
+        if message_id:
+            bot.delete_message(chat_id, int(message_id))
+            return True
+    except Exception as e:
+        print(f"safe_delete skipped: {e}")
+    return False
 
+def remember_user_message_id(user_id, column, message_obj):
+    allowed = {"last_join_message_id", "last_verify_message_id", "last_welcome_message_id"}
+    if column not in allowed or not message_obj:
+        return
+    mid = getattr(message_obj, "message_id", 0) or 0
+    if not mid:
+        return
+    try:
+        db_execute(f"UPDATE users SET {column}=? WHERE user_id=?", (int(mid), int(user_id)))
+    except Exception as e:
+        print(f"remember_user_message_id error: {e}")
+
+def delete_tracked_user_message(user_id, chat_id, column):
+    allowed = {"last_join_message_id", "last_verify_message_id", "last_welcome_message_id"}
+    if column not in allowed:
+        return False
+    user = get_user(user_id)
+    if not user:
+        return False
+    try:
+        mid = int(user[column] or 0)
+    except Exception:
+        mid = 0
+    ok = safe_delete(chat_id, mid)
+    try:
+        db_execute(f"UPDATE users SET {column}=0 WHERE user_id=?", (int(user_id),))
+    except Exception:
+        pass
+    return ok
+
+def reset_all_user_balances(admin_id=0):
+    rows = db_execute("SELECT COUNT(*) AS c, COALESCE(SUM(balance),0) AS total FROM users", fetchone=True)
+    count = int(rows["c"] if rows else 0)
+    total = float(rows["total"] if rows else 0)
+    db_execute("UPDATE users SET balance=0, bonus_balance=0")
+    if admin_id:
+        log_admin_action(admin_id, "reset_all_balances", f"Reset ₹{total:.2f} from {count} users")
+    return count, total
 
 # ======================== SYSTEMS INIT ========================
 
@@ -1264,7 +1303,7 @@ def check_force_join(user_id):
             return False
     return True
 
-def send_join_message(chat_id):
+def send_join_message(chat_id, user_id=None):
     join_image = "https://advisory-brown-r63twvnsdu.edgeone.app/c693132c-cd1f-4a81-9b5e-8b8f042e490b.png"
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(types.InlineKeyboardButton("🔏 Join", url=REQUEST_CHANNEL))
@@ -1287,11 +1326,16 @@ def send_join_message(chat_id):
         f"{pe('excl')} <b>Note:</b> Force join is applied on all the Channels.\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
+    if user_id:
+        delete_tracked_user_message(user_id, chat_id, "last_join_message_id")
     try:
-        bot.send_photo(chat_id, join_image, caption=caption, parse_mode="HTML", reply_markup=markup)
+        msg = bot.send_photo(chat_id, join_image, caption=caption, parse_mode="HTML", reply_markup=markup)
     except Exception as e:
         print(f"send_join_message photo error: {e}")
-        bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=markup)
+        msg = bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=markup)
+    if user_id:
+        remember_user_message_id(user_id, "last_join_message_id", msg)
+    return msg
 
 # ======================== NOTIFICATIONS ========================
 def send_public_withdrawal_notification(user_id, amount, upi_id, status, txn_id=""):

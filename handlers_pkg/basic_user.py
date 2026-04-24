@@ -46,9 +46,12 @@ def start_handler(message):
     mark_user_active(user_id)
 
     if not check_force_join(user_id):
-        send_join_message(chat_id)
+        delete_tracked_user_message(user_id, chat_id, "last_welcome_message_id")
+        send_join_message(chat_id, user_id)
         return
 
+    delete_tracked_user_message(user_id, chat_id, "last_join_message_id")
+    delete_tracked_user_message(user_id, chat_id, "last_verify_message_id")
     send_welcome(chat_id, user_id, first_name, is_new)
 
     if is_new and not is_admin(user_id):
@@ -98,10 +101,13 @@ def send_welcome(chat_id, user_id, first_name, is_new=False):
         f"{pe('sparkle')} <i>No limit! Earn unlimited!</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
+    delete_tracked_user_message(user_id, chat_id, "last_verify_message_id")
+    delete_tracked_user_message(user_id, chat_id, "last_join_message_id")
     try:
-        bot.send_photo(chat_id, welcome_image, caption=caption, parse_mode="HTML", reply_markup=get_main_keyboard(user_id))
+        msg = bot.send_photo(chat_id, welcome_image, caption=caption, parse_mode="HTML", reply_markup=get_main_keyboard(user_id))
     except Exception:
-        safe_send(chat_id, caption, reply_markup=get_main_keyboard(user_id))
+        msg = safe_send(chat_id, caption, reply_markup=get_main_keyboard(user_id))
+    remember_user_message_id(user_id, "last_welcome_message_id", msg)
 
 # ======================== VERIFY JOIN ========================
 @bot.callback_query_handler(func=lambda call: call.data == "verify_join")
@@ -109,19 +115,19 @@ def verify_join(call):
     user_id = call.from_user.id
     if not check_force_join(user_id):
         safe_answer(call, "Join all channels first!", True)
-        send_join_message(call.message.chat.id)
+        send_join_message(call.message.chat.id, user_id)
         return
     user = get_user(user_id)
     if not user:
         safe_answer(call, "Please send /start first.", True)
         return
     mark_user_active(user_id)
+    delete_tracked_user_message(user_id, call.message.chat.id, "last_join_message_id")
     if is_ip_verification_required() and int(user["ip_verified"] or 0) != 1:
-        safe_delete(call.message.chat.id, call.message.message_id)
+        delete_tracked_user_message(user_id, call.message.chat.id, "last_welcome_message_id")
         send_ip_verify_message(call.message.chat.id, user_id)
         safe_answer(call, "Open verification page")
         return
-    safe_delete(call.message.chat.id, call.message.message_id)
     process_referral_bonus(user_id)
     send_welcome(call.message.chat.id, user_id, call.from_user.first_name or "User")
     safe_answer(call, "Welcome sent!")
@@ -135,32 +141,11 @@ def check_ip_verified(call):
         safe_answer(call, "Please send /start first.", True)
         return
     if is_ip_verification_required() and int(user["ip_verified"] or 0) != 1:
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("▶️ Continue /start", callback_data="restart_start"))
-        safe_send(
-            call.message.chat.id,
-            f"{pe('boom')} <b>Verification Failed!</b> {pe('warning')}\n\n"
-            f"{pe('cross')} Verification abhi complete nahi hui. Continue dabao aur /start se dobara try karo.",
-            reply_markup=markup
-        )
         safe_answer(call, "Still not verified!", True)
         return
-    safe_delete(call.message.chat.id, call.message.message_id)
     process_referral_bonus(user_id)
     send_welcome(call.message.chat.id, user_id, call.from_user.first_name or "User")
     safe_answer(call, "✅ Verification complete!")
-
-@bot.callback_query_handler(func=lambda call: call.data == "restart_start")
-def restart_start(call):
-    safe_delete(call.message.chat.id, call.message.message_id)
-    safe_answer(call)
-    try:
-        fake = call.message
-        fake.text = "/start"
-        fake.from_user = call.from_user
-        start_handler(fake)
-    except Exception:
-        safe_send(call.message.chat.id, "Please send /start to continue.")
 
 # ======================== BALANCE ========================
 @bot.message_handler(func=lambda m: m.text == "💰 Balance")
