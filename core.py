@@ -95,9 +95,11 @@ DEFAULT_SETTINGS = {
     "inactivity_min_balance_floor": 1,
     "inactivity_definition": "no_referral_or_bonus_claim",
     "game_daily_bonus_cooldown_hours": 24,
-    "single_device_enabled": True,
-    "single_device_penalty_enabled": True,
-    "single_device_penalty_percent": 10,
+    "device_lock_enabled": True,
+    "device_penalty_enabled": True,
+    "device_penalty_percent": 10,
+    "device_warning_text": "⚠️ Multiple accounts from one device are not allowed. This is your only warning. If you continue, 10% will be deducted from the inviter whose referral link you used.",
+    "left_channel_message": "🚪 You have left our channel.\n\n✨ Please join again and press /start to continue.",
 }
 
 PE = {
@@ -302,11 +304,11 @@ def init_db():
             bonus_balance REAL DEFAULT 0,
             last_active_at TEXT DEFAULT '',
             total_referral_earnings REAL DEFAULT 0,
-            multi_account_warning_sent INTEGER DEFAULT 0,
-            single_device_penalty_count INTEGER DEFAULT 0,
-            last_join_message_id INTEGER DEFAULT 0,
-            last_verify_message_id INTEGER DEFAULT 0,
-            last_welcome_message_id INTEGER DEFAULT 0
+            multi_account_warned INTEGER DEFAULT 0,
+            force_join_left_notified INTEGER DEFAULT 0,
+            latest_join_msg_id INTEGER DEFAULT 0,
+            latest_verify_msg_id INTEGER DEFAULT 0,
+            latest_welcome_msg_id INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS withdrawals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -423,6 +425,15 @@ def init_db():
             assigned_at TEXT DEFAULT '',
             note TEXT DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS multi_account_penalties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            offender_user_id INTEGER DEFAULT 0,
+            referrer_user_id INTEGER DEFAULT 0,
+            amount REAL DEFAULT 0,
+            percent REAL DEFAULT 10,
+            reason TEXT DEFAULT '',
+            created_at TEXT DEFAULT ''
+        );
     """)
 
     try:
@@ -455,15 +466,15 @@ def init_db():
         c.execute("ALTER TABLE users ADD COLUMN total_referral_earnings REAL DEFAULT 0")
     except:
         pass
-    for stmt in [
-        "ALTER TABLE users ADD COLUMN multi_account_warning_sent INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN single_device_penalty_count INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN last_join_message_id INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN last_verify_message_id INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN last_welcome_message_id INTEGER DEFAULT 0",
+    for _col_stmt in [
+        "ALTER TABLE users ADD COLUMN multi_account_warned INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN force_join_left_notified INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN latest_join_msg_id INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN latest_verify_msg_id INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN latest_welcome_msg_id INTEGER DEFAULT 0",
     ]:
         try:
-            c.execute(stmt)
+            c.execute(_col_stmt)
         except:
             pass
     try:
@@ -505,6 +516,8 @@ def init_db():
     c.execute("UPDATE users SET welcome_bonus_paid=0 WHERE welcome_bonus_paid IS NULL")
     c.execute("UPDATE users SET bonus_balance=0 WHERE bonus_balance IS NULL")
     c.execute("UPDATE users SET total_referral_earnings=0 WHERE total_referral_earnings IS NULL")
+    c.execute("UPDATE users SET multi_account_warned=0 WHERE multi_account_warned IS NULL")
+    c.execute("UPDATE users SET force_join_left_notified=0 WHERE force_join_left_notified IS NULL")
 
     # Force redeem-code withdrawal rules from code so old DB values do not keep overriding them
     c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", ("max_single_withdraw_amount", (c.execute("SELECT value FROM settings WHERE key='max_single_withdraw_amount'").fetchone() or {"value": json.dumps(DEFAULT_SETTINGS["max_single_withdraw_amount"])} )["value"]))
@@ -1115,54 +1128,6 @@ def safe_answer(call, text="", alert=False):
         pass
 
 
-def safe_delete(chat_id, message_id):
-    try:
-        if message_id:
-            bot.delete_message(chat_id, int(message_id))
-            return True
-    except Exception as e:
-        print(f"safe_delete skipped: {e}")
-    return False
-
-def remember_user_message_id(user_id, column, message_obj):
-    allowed = {"last_join_message_id", "last_verify_message_id", "last_welcome_message_id"}
-    if column not in allowed or not message_obj:
-        return
-    mid = getattr(message_obj, "message_id", 0) or 0
-    if not mid:
-        return
-    try:
-        db_execute(f"UPDATE users SET {column}=? WHERE user_id=?", (int(mid), int(user_id)))
-    except Exception as e:
-        print(f"remember_user_message_id error: {e}")
-
-def delete_tracked_user_message(user_id, chat_id, column):
-    allowed = {"last_join_message_id", "last_verify_message_id", "last_welcome_message_id"}
-    if column not in allowed:
-        return False
-    user = get_user(user_id)
-    if not user:
-        return False
-    try:
-        mid = int(user[column] or 0)
-    except Exception:
-        mid = 0
-    ok = safe_delete(chat_id, mid)
-    try:
-        db_execute(f"UPDATE users SET {column}=0 WHERE user_id=?", (int(user_id),))
-    except Exception:
-        pass
-    return ok
-
-def reset_all_user_balances(admin_id=0):
-    rows = db_execute("SELECT COUNT(*) AS c, COALESCE(SUM(balance),0) AS total FROM users", fetchone=True)
-    count = int(rows["c"] if rows else 0)
-    total = float(rows["total"] if rows else 0)
-    db_execute("UPDATE users SET balance=0, bonus_balance=0")
-    if admin_id:
-        log_admin_action(admin_id, "reset_all_balances", f"Reset ₹{total:.2f} from {count} users")
-    return count, total
-
 # ======================== SYSTEMS INIT ========================
 
 anticheat = AntiCheatSystem(
@@ -1291,16 +1256,151 @@ def get_admin_keyboard():
     )
     return markup
 
+
+def safe_delete_message(chat_id, message_id):
+    try:
+        if message_id:
+            bot.delete_message(chat_id, int(message_id))
+            return True
+    except Exception as e:
+        print(f"delete message skipped: {e}")
+    return False
+
+
+def remember_user_message_id(user_id, field, message_obj):
+    try:
+        if message_obj and hasattr(message_obj, "message_id"):
+            update_user(user_id, **{field: int(message_obj.message_id)})
+    except Exception as e:
+        print(f"remember message id failed: {e}")
+
+
+def delete_tracked_user_message(user_id, chat_id, field):
+    user = get_user(user_id)
+    if not user:
+        return False
+    msg_id = int(user[field] or 0) if field in user.keys() else 0
+    ok = safe_delete_message(chat_id, msg_id)
+    if msg_id:
+        try:
+            update_user(user_id, **{field: 0})
+        except Exception:
+            pass
+    return ok
+
+
+def build_start_button(text="▶️ Continue"):
+    markup = types.InlineKeyboardMarkup()
+    try:
+        bot_username = bot.get_me().username
+        markup.add(types.InlineKeyboardButton(text, url=f"https://t.me/{bot_username}?start=start"))
+    except Exception:
+        markup.add(types.InlineKeyboardButton(text, callback_data="start_continue"))
+    return markup
+
+
+def send_verification_failed_message(chat_id, user_id, reason=""):
+    delete_tracked_user_message(user_id, chat_id, "latest_verify_msg_id")
+    text = (
+        f"{pe('cross')} <b>Verification failed.</b>\n\n"
+        f"{h(reason) if reason else 'Please try again from the start.'}\n\n"
+        f"Tap the button below to continue."
+    )
+    msg = safe_send(chat_id, text, reply_markup=build_start_button("▶️ Continue /start"))
+    remember_user_message_id(user_id, "latest_verify_msg_id", msg)
+    return msg
+
+def handle_multi_account_penalty(offender_user_id, reason=""):
+    if not bool(get_setting("device_lock_enabled")):
+        return False
+    offender = get_user(offender_user_id)
+    if not offender:
+        return False
+    referrer_id = int(offender["referred_by"] or 0)
+    if not referrer_id:
+        return False
+    warned = int(offender["multi_account_warned"] or 0)
+    warning_text = str(get_setting("device_warning_text") or DEFAULT_SETTINGS["device_warning_text"])
+    if warned == 0:
+        update_user(offender_user_id, multi_account_warned=1)
+        try:
+            safe_send(offender_user_id, warning_text, reply_markup=build_start_button("▶️ Continue /start"))
+        except Exception:
+            pass
+        try:
+            safe_send(
+                referrer_id,
+                f"{pe('warning')} <b>Referral warning</b>\n\n"
+                "A user who joined from your referral link triggered multi-account checks. "
+                "No deduction has been made yet."
+            )
+        except Exception:
+            pass
+        return True
+    if not bool(get_setting("device_penalty_enabled")):
+        return False
+    referrer = get_user(referrer_id)
+    if not referrer:
+        return False
+    try:
+        pct = float(get_setting("device_penalty_percent") or 10)
+    except Exception:
+        pct = 10.0
+    pct = max(0.0, min(100.0, pct))
+    balance = float(referrer["balance"] or 0)
+    deduction = round(balance * pct / 100.0, 2)
+    if deduction <= 0:
+        return False
+    new_balance = max(0.0, balance - deduction)
+    update_user(referrer_id, balance=new_balance)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    db_execute(
+        "INSERT INTO multi_account_penalties (offender_user_id, referrer_user_id, amount, percent, reason, created_at) VALUES (?,?,?,?,?,?)",
+        (offender_user_id, referrer_id, deduction, pct, reason or "multi_account", now)
+    )
+    try:
+        safe_send(
+            referrer_id,
+            f"{pe('warning')} <b>Multi-account penalty applied</b>\n\n"
+            "A user from your referral link tried to use multiple accounts.\n"
+            f"Deducted: <b>₹{deduction:.2f}</b> ({pct:.0f}% of your balance)."
+        )
+    except Exception:
+        pass
+    try:
+        safe_send(offender_user_id, f"{pe('no_entry')} Multiple accounts from one device are not allowed.", reply_markup=build_start_button("▶️ Continue /start"))
+    except Exception:
+        pass
+    return True
+
+def send_left_channel_message(user_id):
+    user = get_user(user_id)
+    if not user or int(user["force_join_left_notified"] or 0) == 1:
+        return
+    text = str(get_setting("left_channel_message") or DEFAULT_SETTINGS["left_channel_message"])
+    try:
+        safe_send(user_id, text, reply_markup=build_start_button("▶️ Continue /start"))
+        update_user(user_id, force_join_left_notified=1)
+    except Exception:
+        pass
+
 # ======================== FORCE JOIN ========================
 def check_force_join(user_id):
+    user = get_user(user_id)
     for channel in FORCE_JOIN_CHANNELS:
         try:
             member = bot.get_chat_member(channel, user_id)
             if member.status in ["left", "kicked"]:
+                if user and int(user["ip_verified"] or 0) == 1:
+                    send_left_channel_message(user_id)
                 return False
         except Exception as e:
             print(f"Force join check error for {channel}: {e}")
+            if user and int(user["ip_verified"] or 0) == 1:
+                send_left_channel_message(user_id)
             return False
+    if user and int(user["force_join_left_notified"] or 0) == 1:
+        update_user(user_id, force_join_left_notified=0)
     return True
 
 def send_join_message(chat_id, user_id=None):
@@ -1326,16 +1426,15 @@ def send_join_message(chat_id, user_id=None):
         f"{pe('excl')} <b>Note:</b> Force join is applied on all the Channels.\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
-    if user_id:
-        delete_tracked_user_message(user_id, chat_id, "last_join_message_id")
     try:
         msg = bot.send_photo(chat_id, join_image, caption=caption, parse_mode="HTML", reply_markup=markup)
+        if user_id:
+            remember_user_message_id(user_id, "latest_join_msg_id", msg)
     except Exception as e:
         print(f"send_join_message photo error: {e}")
         msg = bot.send_message(chat_id, caption, parse_mode="HTML", reply_markup=markup)
-    if user_id:
-        remember_user_message_id(user_id, "last_join_message_id", msg)
-    return msg
+        if user_id:
+            remember_user_message_id(user_id, "latest_join_msg_id", msg)
 
 # ======================== NOTIFICATIONS ========================
 def send_public_withdrawal_notification(user_id, amount, upi_id, status, txn_id=""):

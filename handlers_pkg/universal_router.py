@@ -803,26 +803,6 @@ def universal_handler(message):
         safe_send(message.chat.id, f"{pe('check')} Referral level {level} set to {mode} {value}")
         return
 
-    if state == "admin_set_single_device_penalty_percent":
-        try:
-            val = float(text)
-        except:
-            safe_send(message.chat.id, f"{pe('cross')} Enter valid number!")
-            return
-        if val < 0 or val > 100:
-            safe_send(message.chat.id, f"{pe('cross')} Enter a percent between 0 and 100.")
-            return
-        clear_state(user_id)
-        set_setting("single_device_penalty_percent", val)
-        try:
-            cfg = anticheat.get_anti_settings()
-            cfg["single_device_penalty_percent"] = val
-            anticheat.save_anti_settings(cfg)
-        except Exception:
-            pass
-        safe_send(message.chat.id, f"{pe('check')} One-device penalty percent = {val:g}%")
-        return
-
     if state == "admin_set_max_withdraw":
         try:
             val = float(text)
@@ -832,6 +812,45 @@ def universal_handler(message):
         clear_state(user_id)
         set_setting("max_withdraw_per_day", val)
         safe_send(message.chat.id, f"{pe('check')} Max Withdraw/Day = ₹{val}")
+        return
+
+
+    if state == "admin_set_daily_withdraw_limit":
+        try:
+            val = int(text)
+            if val < 1:
+                raise ValueError
+        except:
+            safe_send(message.chat.id, f"{pe('cross')} Enter a valid number greater than 0!")
+            return
+        clear_state(user_id)
+        saved = withdraw_limit.set_daily_limit(val)
+        safe_send(message.chat.id, f"{pe('check')} Daily withdrawal limit = {saved} withdrawal(s) per day")
+        return
+
+    if state == "admin_set_device_penalty_percent":
+        try:
+            val = float(text)
+            if val < 0 or val > 100:
+                raise ValueError
+        except:
+            safe_send(message.chat.id, f"{pe('cross')} Enter valid percent from 0 to 100!")
+            return
+        clear_state(user_id)
+        set_setting("device_penalty_percent", val)
+        safe_send(message.chat.id, f"{pe('check')} Device multi-account penalty = {val}%")
+        return
+
+    if state == "admin_set_left_channel_message":
+        clear_state(user_id)
+        set_setting("left_channel_message", text)
+        safe_send(message.chat.id, f"{pe('check')} Left-channel message updated.")
+        return
+
+    if state == "admin_set_device_warning_text":
+        clear_state(user_id)
+        set_setting("device_warning_text", text)
+        safe_send(message.chat.id, f"{pe('check')} Multi-account warning message updated.")
         return
 
     if state == "admin_set_withdraw_time":

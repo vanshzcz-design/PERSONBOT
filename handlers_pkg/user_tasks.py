@@ -5,7 +5,7 @@ from core import *
 def tasks_handler(message):
     user_id = message.from_user.id
     if not check_force_join(user_id):
-        send_join_message(message.chat.id)
+        send_join_message(message.chat.id, user_id)
         return
     user = get_user(user_id)
     if not user:

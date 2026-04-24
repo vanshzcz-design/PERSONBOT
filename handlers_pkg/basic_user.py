@@ -46,12 +46,9 @@ def start_handler(message):
     mark_user_active(user_id)
 
     if not check_force_join(user_id):
-        delete_tracked_user_message(user_id, chat_id, "last_welcome_message_id")
         send_join_message(chat_id, user_id)
         return
 
-    delete_tracked_user_message(user_id, chat_id, "last_join_message_id")
-    delete_tracked_user_message(user_id, chat_id, "last_verify_message_id")
     send_welcome(chat_id, user_id, first_name, is_new)
 
     if is_new and not is_admin(user_id):
@@ -69,7 +66,21 @@ def start_handler(message):
         except Exception:
             pass
 
+
+@bot.callback_query_handler(func=lambda call: call.data == "start_continue")
+def start_continue(call):
+    safe_answer(call)
+    class _Msg:
+        pass
+    msg = _Msg()
+    msg.from_user = call.from_user
+    msg.chat = call.message.chat
+    msg.text = "/start"
+    start_handler(msg)
+
 def send_welcome(chat_id, user_id, first_name, is_new=False):
+    delete_tracked_user_message(user_id, chat_id, "latest_join_msg_id")
+    delete_tracked_user_message(user_id, chat_id, "latest_verify_msg_id")
     grant_welcome_bonus_if_eligible(user_id)
     user = get_user(user_id)
     if not user:
@@ -101,13 +112,12 @@ def send_welcome(chat_id, user_id, first_name, is_new=False):
         f"{pe('sparkle')} <i>No limit! Earn unlimited!</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
-    delete_tracked_user_message(user_id, chat_id, "last_verify_message_id")
-    delete_tracked_user_message(user_id, chat_id, "last_join_message_id")
     try:
         msg = bot.send_photo(chat_id, welcome_image, caption=caption, parse_mode="HTML", reply_markup=get_main_keyboard(user_id))
+        remember_user_message_id(user_id, "latest_welcome_msg_id", msg)
     except Exception:
         msg = safe_send(chat_id, caption, reply_markup=get_main_keyboard(user_id))
-    remember_user_message_id(user_id, "last_welcome_message_id", msg)
+        remember_user_message_id(user_id, "latest_welcome_msg_id", msg)
 
 # ======================== VERIFY JOIN ========================
 @bot.callback_query_handler(func=lambda call: call.data == "verify_join")
@@ -115,6 +125,7 @@ def verify_join(call):
     user_id = call.from_user.id
     if not check_force_join(user_id):
         safe_answer(call, "Join all channels first!", True)
+        safe_delete_message(call.message.chat.id, call.message.message_id)
         send_join_message(call.message.chat.id, user_id)
         return
     user = get_user(user_id)
@@ -122,9 +133,9 @@ def verify_join(call):
         safe_answer(call, "Please send /start first.", True)
         return
     mark_user_active(user_id)
-    delete_tracked_user_message(user_id, call.message.chat.id, "last_join_message_id")
     if is_ip_verification_required() and int(user["ip_verified"] or 0) != 1:
-        delete_tracked_user_message(user_id, call.message.chat.id, "last_welcome_message_id")
+        safe_delete_message(call.message.chat.id, call.message.message_id)
+        delete_tracked_user_message(user_id, call.message.chat.id, "latest_join_msg_id")
         send_ip_verify_message(call.message.chat.id, user_id)
         safe_answer(call, "Open verification page")
         return
@@ -142,6 +153,8 @@ def check_ip_verified(call):
         return
     if is_ip_verification_required() and int(user["ip_verified"] or 0) != 1:
         safe_answer(call, "Still not verified!", True)
+        safe_delete_message(call.message.chat.id, call.message.message_id)
+        send_verification_failed_message(call.message.chat.id, user_id, "Verification is not complete yet.")
         return
     process_referral_bonus(user_id)
     send_welcome(call.message.chat.id, user_id, call.from_user.first_name or "User")
@@ -152,7 +165,7 @@ def check_ip_verified(call):
 def balance_handler(message):
     user_id = message.from_user.id
     if not check_force_join(user_id):
-        send_join_message(message.chat.id)
+        send_join_message(message.chat.id, user_id)
         return
     user = get_user(user_id)
     if not user:
@@ -210,7 +223,7 @@ def refresh_balance(call):
 def refer_handler(message):
     user_id = message.from_user.id
     if not check_force_join(user_id):
-        send_join_message(message.chat.id)
+        send_join_message(message.chat.id, user_id)
         return
     user = get_user(user_id)
     if not user:

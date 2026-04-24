@@ -14,7 +14,7 @@ def is_withdraw_time():
 def withdraw_handler(message):
     user_id = message.from_user.id
     if not check_force_join(user_id):
-        send_join_message(message.chat.id)
+        send_join_message(message.chat.id, user_id)
         return
     show_withdraw(message.chat.id, user_id)
 
@@ -301,7 +301,7 @@ def cancel_withdraw(call):
 def gift_handler(message):
     user_id = message.from_user.id
     if not check_force_join(user_id):
-        send_join_message(message.chat.id)
+        send_join_message(message.chat.id, user_id)
         return
     user = get_user(user_id)
     if not user:

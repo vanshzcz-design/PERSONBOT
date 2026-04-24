@@ -720,6 +720,10 @@ def show_settings(chat_id):
     wb = get_setting("welcome_bonus")
     db_val = get_setting("daily_bonus")
     mx = get_setting("max_withdraw_per_day")
+    daily_wd_limit = withdraw_limit.get_daily_limit()
+    device_lock = bool(get_setting("device_lock_enabled"))
+    device_penalty = bool(get_setting("device_penalty_enabled"))
+    device_pct = float(get_setting("device_penalty_percent") or 10)
     ws = get_setting("withdraw_time_start")
     we = get_setting("withdraw_time_end")
     wd_en = get_setting("withdraw_enabled")
@@ -741,6 +745,21 @@ def show_settings(chat_id):
     markup.add(
         types.InlineKeyboardButton(f"📈 Max WD: ₹{mx}", callback_data="s_max_wd"),
         types.InlineKeyboardButton(f"⏰ Time: {ws}-{we}h", callback_data="s_wd_time"),
+    )
+    markup.add(
+        types.InlineKeyboardButton(f"🏧 Daily WD Limit: {daily_wd_limit}", callback_data="s_daily_wd_limit"),
+        types.InlineKeyboardButton("💣 Reset All Balances", callback_data="s_reset_all_balances"),
+    )
+    markup.add(
+        types.InlineKeyboardButton(f"{'🟢' if device_lock else '🔴'} Device Lock", callback_data="tog_device_lock"),
+        types.InlineKeyboardButton(f"{'🟢' if device_penalty else '🔴'} Device Penalty {device_pct:.0f}%", callback_data="tog_device_penalty"),
+    )
+    markup.add(
+        types.InlineKeyboardButton("✏️ Device Penalty %", callback_data="s_device_penalty_percent"),
+        types.InlineKeyboardButton("✏️ Device Warning", callback_data="s_device_warning_msg"),
+    )
+    markup.add(
+        types.InlineKeyboardButton("✏️ Left Channel Msg", callback_data="s_left_channel_msg"),
     )
     markup.add(
         types.InlineKeyboardButton(f"{'🟢' if wd_en else '🔴'} Withdraw", callback_data="tog_withdraw"),
@@ -770,11 +789,7 @@ def show_settings(chat_id):
     )
     markup.add(
         types.InlineKeyboardButton("🔄 Reset User", callback_data="s_reset_user"),
-        types.InlineKeyboardButton("🧹 Reset All Balances", callback_data="s_reset_all_balances"),
-    )
-    markup.add(
         types.InlineKeyboardButton("💰 Add Balance", callback_data="s_add_bal"),
-        types.InlineKeyboardButton("💳 Set WD Limit", callback_data="s_min_wd"),
     )
     markup.add(
         types.InlineKeyboardButton("💸 Deduct Balance", callback_data="s_deduct_bal"),
@@ -821,6 +836,22 @@ def s_daily(call):
 def s_max_wd(call):
     settings_ask(call, "admin_set_max_withdraw", f"{pe('pencil')} Enter new Max Withdraw Per Day (₹):")
 
+@bot.callback_query_handler(func=lambda call: call.data == "s_daily_wd_limit")
+def s_daily_wd_limit(call):
+    settings_ask(call, "admin_set_daily_withdraw_limit", f"{pe('pencil')} Enter daily withdrawal count limit (example: <code>2</code>):")
+
+@bot.callback_query_handler(func=lambda call: call.data == "s_device_penalty_percent")
+def s_device_penalty_percent(call):
+    settings_ask(call, "admin_set_device_penalty_percent", f"{pe('pencil')} Enter multi-account referral penalty percent (default 10):")
+
+@bot.callback_query_handler(func=lambda call: call.data == "s_left_channel_msg")
+def s_left_channel_msg(call):
+    settings_ask(call, "admin_set_left_channel_message", f"{pe('pencil')} Send the message users receive when they leave a force-join channel. HTML allowed.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "s_device_warning_msg")
+def s_device_warning_msg(call):
+    settings_ask(call, "admin_set_device_warning_text", f"{pe('pencil')} Send the one-time warning text for multi-account users. HTML allowed.")
+
 @bot.callback_query_handler(func=lambda call: call.data == "s_wd_ref_count")
 def s_wd_ref_count(call):
     settings_ask(call, "admin_set_withdraw_required_referrals", f"{pe('pencil')} Enter required referrals for withdrawal:")
@@ -860,61 +891,6 @@ def s_add_bal(call):
 def s_deduct_bal(call):
     settings_ask(call, "admin_deduct_balance", f"{pe('pencil')} Format: <code>USER_ID AMOUNT</code>")
 
-@bot.callback_query_handler(func=lambda call: call.data == "s_reset_all_balances")
-def s_reset_all_balances(call):
-    if not is_admin(call.from_user.id): return
-    safe_answer(call)
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("✅ Confirm Reset All Balances", callback_data="confirm_reset_all_balances"))
-    markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="open_settings"))
-    safe_send(
-        call.message.chat.id,
-        f"{pe('warning')} <b>Confirm Balance Reset</b>\n\n"
-        "This will deduct/reset the balance of <b>all users</b> to ₹0. Bonus balance will also be reset. Existing withdrawals and users will not be deleted.",
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data == "confirm_reset_all_balances")
-def confirm_reset_all_balances(call):
-    if not is_admin(call.from_user.id): return
-    safe_answer(call, "Resetting balances...")
-    count, total = reset_all_user_balances(call.from_user.id)
-    safe_send(call.message.chat.id, f"{pe('check')} Reset complete. Deducted/reset <b>₹{total:.2f}</b> from <b>{count}</b> users.")
-    show_settings(call.message.chat.id)
-
-@bot.callback_query_handler(func=lambda call: call.data == "s_single_device_penalty_percent")
-def s_single_device_penalty_percent(call):
-    settings_ask(call, "admin_set_single_device_penalty_percent", f"{pe('pencil')} Enter one-device multi-account penalty percent (example: <code>10</code>):")
-
-@bot.callback_query_handler(func=lambda call: call.data == "tog_single_device")
-def tog_single_device(call):
-    if not is_admin(call.from_user.id): return
-    cur = bool(get_setting("single_device_enabled"))
-    set_setting("single_device_enabled", not cur)
-    # keep anti_settings in sync for the web verifier
-    try:
-        cfg = anticheat.get_anti_settings()
-        cfg["single_device_enabled"] = not cur
-        anticheat.save_anti_settings(cfg)
-    except Exception:
-        pass
-    safe_answer(call, f"One-device rule {'enabled' if not cur else 'disabled'}")
-    adv_verification(call)
-
-@bot.callback_query_handler(func=lambda call: call.data == "tog_single_device_penalty")
-def tog_single_device_penalty(call):
-    if not is_admin(call.from_user.id): return
-    cur = bool(get_setting("single_device_penalty_enabled"))
-    set_setting("single_device_penalty_enabled", not cur)
-    try:
-        cfg = anticheat.get_anti_settings()
-        cfg["single_device_penalty_enabled"] = not cur
-        anticheat.save_anti_settings(cfg)
-    except Exception:
-        pass
-    safe_answer(call, f"Device penalty {'enabled' if not cur else 'disabled'}")
-    adv_verification(call)
-
 @bot.callback_query_handler(func=lambda call: call.data == "tog_withdraw")
 def tog_withdraw(call):
     if not is_admin(call.from_user.id): return
@@ -930,6 +906,47 @@ def tog_wd_ref_gate(call):
     set_setting("withdraw_referral_requirement_enabled", not cur)
     safe_answer(call, f"Withdrawal referral gate {'Enabled' if not cur else 'Disabled'}!")
     show_settings(call.message.chat.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "tog_device_lock")
+def tog_device_lock(call):
+    if not is_admin(call.from_user.id): return
+    cur = bool(get_setting("device_lock_enabled"))
+    set_setting("device_lock_enabled", not cur)
+    safe_answer(call, f"Device lock {'Enabled' if not cur else 'Disabled'}!")
+    show_settings(call.message.chat.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "tog_device_penalty")
+def tog_device_penalty(call):
+    if not is_admin(call.from_user.id): return
+    cur = bool(get_setting("device_penalty_enabled"))
+    set_setting("device_penalty_enabled", not cur)
+    safe_answer(call, f"Device penalty {'Enabled' if not cur else 'Disabled'}!")
+    show_settings(call.message.chat.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "s_reset_all_balances")
+def s_reset_all_balances(call):
+    if not is_admin(call.from_user.id): return
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ YES, ZERO ALL BALANCES", callback_data="confirm_reset_all_balances"),
+        types.InlineKeyboardButton("❌ Cancel", callback_data="cancel_action"),
+    )
+    safe_answer(call)
+    safe_send(
+        call.message.chat.id,
+        f"{pe('siren')} <b>Reset balance of ALL users?</b>\n\n"
+        "This sets every user's balance and bonus balance to ₹0. It does not delete users.",
+        reply_markup=markup,
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "confirm_reset_all_balances")
+def confirm_reset_all_balances(call):
+    if not is_admin(call.from_user.id): return
+    total = db_execute("SELECT COUNT(*) as c, SUM(balance) as s FROM users", fetchone=True) or {"c": 0, "s": 0}
+    db_execute("UPDATE users SET balance=0, bonus_balance=0")
+    log_admin_action(call.from_user.id, "reset_all_balances", f"Reset balances for {total['c']} users; deducted total ₹{total['s'] or 0:.2f}")
+    safe_answer(call, "✅ All balances reset")
+    safe_send(call.message.chat.id, f"{pe('check')} Reset balances for <b>{total['c']}</b> users. Total deducted: <b>₹{total['s'] or 0:.2f}</b>")
 
 @bot.callback_query_handler(func=lambda call: call.data == "tog_refer")
 def tog_refer(call):
@@ -1350,18 +1367,10 @@ def adv_verification(call):
     safe_answer(call)
     enabled = bool(get_setting("ip_verification_enabled"))
     markup = types.InlineKeyboardMarkup(row_width=2)
-    single_device = bool(get_setting("single_device_enabled"))
-    penalty_enabled = bool(get_setting("single_device_penalty_enabled"))
-    penalty_pct = float(get_setting("single_device_penalty_percent") or 10)
     markup.add(
         types.InlineKeyboardButton(f"{'🟢' if enabled else '🔴'} Toggle IP Verification", callback_data="tog_ip_verify"),
         types.InlineKeyboardButton("🔁 Manual Verify Fallback", callback_data="noop_manual_verify"),
     )
-    markup.add(
-        types.InlineKeyboardButton(f"{'🟢' if single_device else '🔴'} One Device/One User", callback_data="tog_single_device"),
-        types.InlineKeyboardButton(f"{'🟢' if penalty_enabled else '🔴'} 10% Device Penalty", callback_data="tog_single_device_penalty"),
-    )
-    markup.add(types.InlineKeyboardButton(f"💸 Penalty %: {penalty_pct:g}", callback_data="s_single_device_penalty_percent"))
     safe_send(call.message.chat.id, f"{pe('shield')} <b>Verification Control</b>\n\nIP verification: <b>{'ON' if enabled else 'OFF'}</b>\nAuto welcome after verify: <b>ON</b>\nManual verify button fallback: <b>ON</b>", reply_markup=markup)
 
 
