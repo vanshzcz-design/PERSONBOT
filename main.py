@@ -19,7 +19,7 @@ def run_polling():
             bot.infinity_polling(
                 timeout=30,
                 long_polling_timeout=20,
-                allowed_updates=["message", "callback_query"],
+                allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"],
                 skip_pending=skip_pending,
             )
         except KeyboardInterrupt:

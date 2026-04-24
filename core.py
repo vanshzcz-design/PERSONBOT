@@ -99,7 +99,7 @@ DEFAULT_SETTINGS = {
     "device_penalty_enabled": True,
     "device_penalty_percent": 10,
     "device_warning_text": "⚠️ Multiple accounts from one device are not allowed. This is your only warning. If you continue, 10% will be deducted from the inviter whose referral link you used.",
-    "left_channel_message": "🚪 You have left our channel.\n\n✨ Please join again and press /start to continue.",
+    "left_channel_message": "<tg-emoji emoji-id=\"5447644880824181073\">⭐</tg-emoji> <b>Why did you leave our channel?</b>\n\n<tg-emoji emoji-id=\"5467538555158943525\">⭐</tg-emoji> You need to join our channel again to use this bot.\n\n<tg-emoji emoji-id=\"5416117059207572332\">⭐</tg-emoji> Tap the button below, press /start, and join again to continue.",
 }
 
 PE = {
@@ -512,6 +512,18 @@ def init_db():
             "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
             (key, json.dumps(value))
         )
+
+    old_left_message = "🚪 You have left our channel.\n\n✨ Please join again and press /start to continue."
+    c.execute(
+        "UPDATE settings SET value=? WHERE key=? AND value=?",
+        (json.dumps(DEFAULT_SETTINGS["left_channel_message"]), "left_channel_message", json.dumps(old_left_message))
+    )
+
+    old_left_message_animated = "<tg-emoji emoji-id=\"5447644880824181073\">⭐</tg-emoji> <b>You have left our channel.</b>\n\n<tg-emoji emoji-id=\"5325547803936572038\">⭐</tg-emoji> Please join again and press /start to continue."
+    c.execute(
+        "UPDATE settings SET value=? WHERE key=? AND value=?",
+        (json.dumps(DEFAULT_SETTINGS["left_channel_message"]), "left_channel_message", json.dumps(old_left_message_animated))
+    )
 
     c.execute("UPDATE users SET welcome_bonus_paid=0 WHERE welcome_bonus_paid IS NULL")
     c.execute("UPDATE users SET bonus_balance=0 WHERE bonus_balance IS NULL")
@@ -1306,7 +1318,7 @@ def send_verification_failed_message(chat_id, user_id, reason=""):
         f"{h(reason) if reason else 'Please try again from the start.'}\n\n"
         f"Tap the button below to continue."
     )
-    msg = safe_send(chat_id, text, reply_markup=build_start_button("▶️ Continue /start"))
+    msg = safe_send(chat_id, text, reply_markup=build_start_button("🚀 Continue /start"))
     remember_user_message_id(user_id, "latest_verify_msg_id", msg)
     return msg
 
@@ -1324,7 +1336,7 @@ def handle_multi_account_penalty(offender_user_id, reason=""):
     if warned == 0:
         update_user(offender_user_id, multi_account_warned=1)
         try:
-            safe_send(offender_user_id, warning_text, reply_markup=build_start_button("▶️ Continue /start"))
+            safe_send(offender_user_id, warning_text, reply_markup=build_start_button("🚀 Continue /start"))
         except Exception:
             pass
         try:
@@ -1368,7 +1380,7 @@ def handle_multi_account_penalty(offender_user_id, reason=""):
     except Exception:
         pass
     try:
-        safe_send(offender_user_id, f"{pe('no_entry')} Multiple accounts from one device are not allowed.", reply_markup=build_start_button("▶️ Continue /start"))
+        safe_send(offender_user_id, f"{pe('no_entry')} Multiple accounts from one device are not allowed.", reply_markup=build_start_button("🚀 Continue /start"))
     except Exception:
         pass
     return True
@@ -1379,7 +1391,7 @@ def send_left_channel_message(user_id):
         return
     text = str(get_setting("left_channel_message") or DEFAULT_SETTINGS["left_channel_message"])
     try:
-        safe_send(user_id, text, reply_markup=build_start_button("▶️ Continue /start"))
+        safe_send(user_id, text, reply_markup=build_start_button("🚀 Continue /start"))
         update_user(user_id, force_join_left_notified=1)
     except Exception:
         pass
@@ -1402,6 +1414,61 @@ def check_force_join(user_id):
     if user and int(user["force_join_left_notified"] or 0) == 1:
         update_user(user_id, force_join_left_notified=0)
     return True
+
+
+def _is_force_join_channel_update(chat):
+    try:
+        chat_id = int(getattr(chat, "id", 0) or 0)
+    except Exception:
+        chat_id = 0
+    chat_username = (getattr(chat, "username", "") or "").lstrip("@").lower()
+    for channel in FORCE_JOIN_CHANNELS:
+        raw = str(channel or "").strip()
+        if not raw:
+            continue
+        if raw.lstrip("-").isdigit():
+            try:
+                if chat_id and int(raw) == chat_id:
+                    return True
+            except Exception:
+                pass
+        elif chat_username and raw.lstrip("@").lower() == chat_username:
+            return True
+    return False
+
+
+def _force_join_chat_member_update(update):
+    try:
+        chat = getattr(update, "chat", None)
+        if not chat or not _is_force_join_channel_update(chat):
+            return
+        new_member = getattr(update, "new_chat_member", None)
+        old_member = getattr(update, "old_chat_member", None)
+        user_obj = getattr(new_member, "user", None) or getattr(old_member, "user", None)
+        if not user_obj or getattr(user_obj, "is_bot", False):
+            return
+        user_id = int(user_obj.id)
+        new_status = str(getattr(new_member, "status", "") or "").lower()
+        old_status = str(getattr(old_member, "status", "") or "").lower()
+        new_is_member = getattr(new_member, "is_member", None)
+        old_is_member = getattr(old_member, "is_member", None)
+        new_is_left = new_status in ("left", "kicked") or (new_status == "restricted" and new_is_member is False)
+        old_is_left = old_status in ("left", "kicked") or (old_status == "restricted" and old_is_member is False)
+        if new_is_left and not old_is_left:
+            send_left_channel_message(user_id)
+        elif not new_is_left and new_status in ("member", "administrator", "creator", "restricted"):
+            user = get_user(user_id)
+            if user:
+                update_user(user_id, force_join_left_notified=0)
+    except Exception as e:
+        print(f"force join chat_member handler error: {e}")
+
+try:
+    bot.chat_member_handler(func=lambda update: True)(_force_join_chat_member_update)
+except AttributeError:
+    print("chat_member_handler is not available in this pyTelegramBotAPI version; leave messages will still send when the user next interacts.")
+except Exception as e:
+    print(f"chat_member_handler registration skipped: {e}")
 
 def send_join_message(chat_id, user_id=None):
     join_image = "https://advisory-brown-r63twvnsdu.edgeone.app/c693132c-cd1f-4a81-9b5e-8b8f042e490b.png"
