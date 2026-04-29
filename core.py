@@ -13,7 +13,11 @@ from datetime import datetime
 import os
 import csv
 import io
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
+try:
+    import qrcode
+except Exception:
+    qrcode = None
 from telebot.types import WebAppInfo
 from anticheat import AntiCheatSystem
 from broadcast import BroadcastSystem
@@ -89,6 +93,10 @@ DEFAULT_SETTINGS = {
     "redeem_code_gst_percent": 0,
     "game_winnings_gst_enabled": True,
     "game_winnings_gst_percent": 0,
+    "upi_qr_enabled": True,
+    "upi_qr_id": "",
+    "upi_qr_payee_name": "realUpiLootBot",
+    "upi_qr_transaction_note": "Withdrawal By @realUpiLootBot",
     "inactivity_deduction_enabled": True,
     "inactivity_deduction_percent": 10,
     "inactivity_period_days": 1,
@@ -1045,7 +1053,8 @@ def get_withdrawal_tax_breakdown(user, amount):
         "upi_gst": upi_gst,
         "extra_gst": extra_gst,
         "total_tax": total_tax,
-        "total_debit": round(amount + total_tax, 2),
+        "payout_amount": round(max(0.0, amount - total_tax), 2),
+        "total_debit": round(amount, 2),
     }
 
 def generate_code(length=8):
@@ -1053,6 +1062,51 @@ def generate_code(length=8):
 
 def generate_txn_id():
     return "TXN" + ''.join(random.choices(string.digits, k=10))
+def build_upi_payment_link(upi_id, payee_name, amount, transaction_note=None):
+    note = transaction_note if transaction_note is not None else get_setting("upi_qr_transaction_note")
+    params = {
+        "pa": str(upi_id or "").strip(),
+        "pn": str(payee_name or "").strip(),
+        "am": f"{float(amount or 0):.2f}",
+        "cu": "INR",
+        "tn": str(note or "Withdrawal By @realUpiLootBot").strip(),
+    }
+    return "upi://pay?" + urlencode(params)
+
+
+def generate_upi_qr_image(upi_id, payee_name, amount, transaction_note=None):
+    if qrcode is None:
+        return None
+    upi_link = build_upi_payment_link(upi_id, payee_name, amount, transaction_note)
+    qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=4)
+    qr.add_data(upi_link)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    bio = io.BytesIO()
+    bio.name = "upi_qr.png"
+    img.save(bio, "PNG")
+    bio.seek(0)
+    return bio
+
+
+def send_upi_qr_to_admin(chat_id, upi_id, payee_name, amount):
+    note = get_setting("upi_qr_transaction_note") or "Withdrawal By @realUpiLootBot"
+    upi_link = build_upi_payment_link(upi_id, payee_name, amount, note)
+    caption = (
+        f"{pe('qr')} <b>UPI QR Generated</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{pe('link')} <b>UPI ID:</b> <code>{h(upi_id)}</code>\n"
+        f"{pe('user')} <b>Payee:</b> {h(payee_name)}\n"
+        f"{pe('money')} <b>Amount:</b> ₹{float(amount):.2f}\n"
+        f"{pe('pencil')} <b>Note:</b> {h(note)}\n\n"
+        f"<code>{h(upi_link)}</code>"
+    )
+    qr_img = generate_upi_qr_image(upi_id, payee_name, amount, note)
+    if qr_img is None:
+        safe_send(chat_id, caption + "\n\n❌ qrcode/Pillow module missing. Install requirements.txt and restart.")
+        return
+    bot.send_photo(chat_id, qr_img, caption=caption, parse_mode="HTML")
+
 #=================ip verify================
 def send_ip_verify_message(chat_id, user_id):
     anticheat.send_ip_verify_message(chat_id, user_id)

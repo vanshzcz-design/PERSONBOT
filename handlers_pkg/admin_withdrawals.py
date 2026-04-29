@@ -24,7 +24,7 @@ def confirm_withdraw_cb(call):
 
     tax = get_withdrawal_tax_breakdown(user, amount)
     if tax["total_debit"] > user["balance"]:
-        safe_answer(call, f"❌ Need ₹{tax['total_debit']:.2f} including tax/GST.", True)
+        safe_answer(call, f"❌ Need ₹{tax['total_debit']:.2f} balance.", True)
         return
 
     # ✅ DAILY LIMIT FINAL CHECK YAHAN
@@ -39,7 +39,7 @@ def confirm_withdraw_cb(call):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     w_id = db_lastrowid(
         "INSERT INTO withdrawals (user_id, amount, upi_id, status, created_at, gst_amount, net_amount, method) VALUES (?,?,?,?,?,?,?,?)",
-        (user_id, amount, upi_id, "pending", now, tax["total_tax"], amount, "upi")
+        (user_id, amount, upi_id, "pending", now, tax["total_tax"], tax["payout_amount"], "upi")
     )
 
     safe_answer(call, "✅ Withdrawal request submitted!")
@@ -47,10 +47,12 @@ def confirm_withdraw_cb(call):
         call.message.chat.id, call.message.message_id,
         f"{pe('check')} <b>Withdrawal Submitted!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"{pe('fly_money')} <b>Amount:</b> ₹{amount}\n"
+        f"{pe('fly_money')} <b>Withdrawal Amount:</b> ₹{amount}\n"
+        f"{pe('money')} <b>GST/Tax Deducted:</b> ₹{tax['total_tax']:.2f}\n"
+        f"{pe('check')} <b>User Will Receive:</b> ₹{tax['payout_amount']:.2f}\n"
         f"{pe('link')} <b>UPI:</b> <code>{upi_id}</code>\n"
         f"{pe('hourglass')} <b>Status:</b> Pending ⏳\n\n"
-        f"📋 <i>{tax['total_tax']:.2f} tax/GST deducted for UPI Processing & Management</i>\n"
+        f"📋 <i>Wallet deduction is ₹{amount:.2f}; GST/tax is cut from this amount only.</i>\n"
         f"{pe('info')} Will be processed soon!\n"
         f"{pe('bell')} You'll be notified.\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
@@ -71,6 +73,7 @@ def confirm_withdraw_cb(call):
             f"{pe('disguise')} <b>User:</b> {h(user['first_name'])} (<code>{user_id}</code>)\n"
             f"{pe('fly_money')} <b>Amount:</b> ₹{amount}\n"
             f"{pe('link')} <b>UPI:</b> <code>{upi_id}</code>\n"
+            f"{pe('check')} <b>Payout:</b> ₹{tax['payout_amount']:.2f}\n"
             f"{pe('money')} <b>Remaining:</b> ₹{user['balance'] - tax['total_debit']:.2f}\n"
             f"{pe('thumbs_up')} <b>Referrals:</b> {user['referral_count']}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━",
@@ -103,6 +106,8 @@ def admin_approve(call):
     db_execute("UPDATE withdrawals SET status='approved', processed_at=?, txn_id=? WHERE id=?", (now, txn, w_id))
     uid = wd["user_id"]
     amt = wd["amount"]
+    payout_amt = float(wd["net_amount"] or amt)
+    gst_amt = float(wd["gst_amount"] or 0)
     u = get_user(uid)
     if u:
         update_user(uid, total_withdrawn=u["total_withdrawn"] + amt)
@@ -120,7 +125,9 @@ def admin_approve(call):
             uid,
             f"{pe('party')} <b>Withdrawal Approved!</b> {pe('check')}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{pe('fly_money')} <b>Amount:</b> ₹{amt}\n"
+            f"{pe('fly_money')} <b>Withdrawal Amount:</b> ₹{amt}\n"
+            f"{pe('money')} <b>GST/Tax Deducted:</b> ₹{gst_amt:.2f}\n"
+            f"{pe('check')} <b>Paid Amount:</b> ₹{payout_amt:.2f}\n"
             f"{pe('link')} <b>UPI:</b> {wd['upi_id']}\n"
             f"{pe('bookmark')} <b>TXN:</b> <code>{txn}</code>\n\n"
             f"{pe('check')} Money will arrive shortly!\n"
@@ -128,7 +135,7 @@ def admin_approve(call):
         )
     except Exception:
         pass
-    send_public_withdrawal_notification(uid, amt, wd["upi_id"], "approved", txn)
+    send_public_withdrawal_notification(uid, payout_amt, wd["upi_id"], "approved", txn)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("rejct|"))
 def admin_reject(call):
@@ -151,7 +158,7 @@ def admin_reject(call):
     db_execute("UPDATE withdrawals SET status='rejected', processed_at=? WHERE id=?", (now, w_id))
     uid = wd["user_id"]
     amt = wd["amount"]
-    refund_amount = round(float(wd["amount"] or 0) + float(wd["gst_amount"] or 0), 2)
+    refund_amount = round(float(wd["amount"] or 0), 2)
     u = get_user(uid)
     if u:
         update_user(uid, balance=u["balance"] + refund_amount)
@@ -160,7 +167,7 @@ def admin_reject(call):
     try:
         safe_edit(
             call.message.chat.id, call.message.message_id,
-            (call.message.text or "") + f"\n\n{pe('cross')} <b>REJECTED ❌</b> (Full balance refunded incl. GST)"
+            (call.message.text or "") + f"\n\n{pe('cross')} <b>REJECTED ❌</b> (Wallet amount refunded)"
         )
     except Exception:
         pass

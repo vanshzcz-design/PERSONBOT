@@ -1357,6 +1357,9 @@ def show_advanced_settings(chat_id):
         types.InlineKeyboardButton("👤 User Controls", callback_data="adv_users"),
         types.InlineKeyboardButton("🏧 Withdrawal Controls", callback_data="adv_withdrawals"),
     )
+    markup.add(
+        types.InlineKeyboardButton("📲 UPI QR", callback_data="adv_upi_qr"),
+    )
     safe_send(chat_id, f"{pe('gear')} <b>Advanced Settings</b>\n━━━━━━━━━━━━━━━━━━━━━━\nAll major controls are grouped below.", reply_markup=markup)
 
 
@@ -1695,3 +1698,74 @@ def tog_inactivity(call):
 @bot.callback_query_handler(func=lambda call: call.data == "noop_manual_verify")
 def noop_manual_verify(call):
     safe_answer(call, "Manual verify button remains available.")
+
+# ======================== ADMIN UPI QR MANAGEMENT ========================
+@bot.callback_query_handler(func=lambda call: call.data == "adv_upi_qr")
+def adv_upi_qr(call):
+    if not is_admin(call.from_user.id):
+        return
+    safe_answer(call)
+    enabled = bool(get_setting("upi_qr_enabled"))
+    upi_id = get_setting("upi_qr_id") or "Not set"
+    payee_name = get_setting("upi_qr_payee_name") or "realUpiLootBot"
+    note = get_setting("upi_qr_transaction_note") or "Withdrawal By @realUpiLootBot"
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton(f"{'🟢' if enabled else '🔴'} UPI QR", callback_data="tog_upi_qr"),
+        types.InlineKeyboardButton("📲 Generate QR", callback_data="gen_upi_qr"),
+    )
+    markup.add(
+        types.InlineKeyboardButton("✏️ Set UPI ID", callback_data="set_upi_qr_id"),
+        types.InlineKeyboardButton("✏️ Set Payee Name", callback_data="set_upi_qr_payee"),
+    )
+    markup.add(types.InlineKeyboardButton("📝 Set QR Note", callback_data="set_upi_qr_note"))
+    safe_send(
+        call.message.chat.id,
+        f"{pe('qr')} <b>UPI QR Management</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Status: <b>{'ON' if enabled else 'OFF'}</b>\n"
+        f"UPI ID: <code>{h(upi_id)}</code>\n"
+        f"Payee Name: <b>{h(payee_name)}</b>\n"
+        f"Transaction Note: <b>{h(note)}</b>\n\n"
+        f"QR note is fixed for payment apps as:\n<code>Withdrawal By @realUpiLootBot</code>",
+        reply_markup=markup,
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "tog_upi_qr")
+def tog_upi_qr(call):
+    if not is_admin(call.from_user.id):
+        return
+    cur = bool(get_setting("upi_qr_enabled"))
+    set_setting("upi_qr_enabled", not cur)
+    safe_answer(call, f"UPI QR {'Enabled' if not cur else 'Disabled'}")
+    adv_upi_qr(call)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "set_upi_qr_id")
+def set_upi_qr_id(call):
+    settings_ask(call, "admin_set_upi_qr_id", f"{pe('pencil')} Send admin UPI ID for QR payments:")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "set_upi_qr_payee")
+def set_upi_qr_payee(call):
+    settings_ask(call, "admin_set_upi_qr_payee", f"{pe('pencil')} Send Payee Name for QR:")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "set_upi_qr_note")
+def set_upi_qr_note(call):
+    settings_ask(call, "admin_set_upi_qr_note", f"{pe('pencil')} Send QR transaction note (tn):\n<code>Withdrawal By @realUpiLootBot</code>")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "gen_upi_qr")
+def gen_upi_qr(call):
+    if not is_admin(call.from_user.id):
+        return
+    if not bool(get_setting("upi_qr_enabled")):
+        safe_answer(call, "UPI QR is disabled", True)
+        return
+    settings_ask(
+        call,
+        "admin_generate_upi_qr",
+        f"{pe('pencil')} Send QR details:\n<code>UPI_ID | PAYEE_NAME | AMOUNT</code>\n\nExample:\n<code>yourupi@bank | realUpiLootBot | 10</code>\n\nYou can also send only amount if saved UPI ID and Payee Name are already set.",
+    )

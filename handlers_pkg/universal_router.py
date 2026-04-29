@@ -239,7 +239,7 @@ def universal_handler(message):
             return
         tax = get_withdrawal_tax_breakdown(user, amount)
         if tax["total_debit"] > user["balance"]:
-            safe_send(message.chat.id, f"{pe('cross')} Insufficient balance! Need ₹{tax['total_debit']:.2f} including tax/GST. You have ₹{user['balance']:.2f}")
+            safe_send(message.chat.id, f"{pe('cross')} Insufficient balance! Need ₹{tax['total_debit']:.2f}. You have ₹{user['balance']:.2f}")
             return
         state_data = get_state_data(user_id)
         upi_id = state_data.get("upi_id", user["upi_id"])
@@ -253,7 +253,10 @@ def universal_handler(message):
             message.chat.id,
             f"{pe('warning')} <b>Confirm Withdrawal</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"{pe('fly_money')} <b>Amount:</b> ₹{amount}\n"
+            f"{pe('fly_money')} <b>Withdrawal Amount:</b> ₹{amount}\n"
+            f"{pe('money')} <b>GST/Tax Deducted:</b> ₹{tax['total_tax']:.2f}\n"
+            f"{pe('check')} <b>You Will Receive:</b> ₹{tax['payout_amount']:.2f}\n"
+            f"{pe('info')} <b>Wallet Deduction:</b> ₹{tax['total_debit']:.2f}\n"
             f"{pe('link')} <b>UPI:</b> <code>{upi_id}</code>\n\n"
             f"{pe('info')} Tap Confirm to proceed.\n"
             f"━━━━━━━━━━━━━━━━━━━━━━",
@@ -879,6 +882,52 @@ def universal_handler(message):
         clear_state(user_id)
         set_setting("withdraw_image", text)
         safe_send(message.chat.id, f"{pe('check')} Withdraw image updated!")
+        return
+
+    if state == "admin_set_upi_qr_id":
+        clear_state(user_id)
+        set_setting("upi_qr_id", text)
+        safe_send(message.chat.id, f"{pe('check')} UPI QR ID updated: <code>{h(text)}</code>")
+        return
+
+    if state == "admin_set_upi_qr_payee":
+        clear_state(user_id)
+        set_setting("upi_qr_payee_name", text)
+        safe_send(message.chat.id, f"{pe('check')} UPI QR payee name updated: <b>{h(text)}</b>")
+        return
+
+    if state == "admin_set_upi_qr_note":
+        clear_state(user_id)
+        # Keep the exact requested QR payment description by default.
+        set_setting("upi_qr_transaction_note", text or "Withdrawal By @realUpiLootBot")
+        safe_send(message.chat.id, f"{pe('check')} UPI QR note updated: <code>{h(text or 'Withdrawal By @realUpiLootBot')}</code>")
+        return
+
+    if state == "admin_generate_upi_qr":
+        if not bool(get_setting("upi_qr_enabled")):
+            clear_state(user_id)
+            safe_send(message.chat.id, f"{pe('cross')} UPI QR feature is disabled from admin panel.")
+            return
+        parts = [p.strip() for p in text.split("|")]
+        try:
+            if len(parts) >= 3:
+                upi_id = parts[0]
+                payee_name = parts[1]
+                amount = float(parts[2])
+            else:
+                upi_id = get_setting("upi_qr_id") or ""
+                payee_name = get_setting("upi_qr_payee_name") or "realUpiLootBot"
+                amount = float(text)
+            if not upi_id or amount <= 0:
+                raise ValueError
+        except Exception:
+            safe_send(message.chat.id, f"{pe('cross')} Format: <code>UPI_ID | PAYEE_NAME | AMOUNT</code> or send only amount after saving UPI ID.")
+            return
+        clear_state(user_id)
+        set_setting("upi_qr_id", upi_id)
+        set_setting("upi_qr_payee_name", payee_name)
+        set_setting("upi_qr_transaction_note", "Withdrawal By @realUpiLootBot")
+        send_upi_qr_to_admin(message.chat.id, upi_id, payee_name, amount)
         return
 
     if state == "admin_reset_user":
